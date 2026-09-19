@@ -719,8 +719,12 @@ app.use((err, req, res, next) => {
 // START SERVER
 // =====================================
 
-const PORT = process.env.PORT || 5001;
+export default app;
 
-app.listen(PORT, () => {
-  console.log(`TravelPilot server running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== "production") {
+  const PORT = process.env.PORT || 5001;
+
+  app.listen(PORT, () => {
+    console.log(`TravelPilot server running on port ${PORT}`);
+  });
+}
