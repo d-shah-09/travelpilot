@@ -1,7 +1,7 @@
 import { useState } from "react";
 import "./App.css";
 
-const API_URL = "http://localhost:5001";
+const API_URL = import.meta.env.PROD ? "" : "http://localhost:5001";
 
 function App() {
   const [formData, setFormData] = useState({
