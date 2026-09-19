@@ -16,20 +16,30 @@ function App() {
   });
 
   const [tripGenerated, setTripGenerated] = useState(false);
+
   const [itinerary, setItinerary] = useState([]);
+
   const [loading, setLoading] = useState(false);
 
+  const [fallbackMode, setFallbackMode] = useState(false);
+
+  const [fallbackMessage, setFallbackMessage] = useState("");
+
   const [chatMessage, setChatMessage] = useState("");
+
   const [chatAnswer, setChatAnswer] = useState("");
+
   const [chatLoading, setChatLoading] = useState(false);
 
   const [budgetOptimizing, setBudgetOptimizing] = useState(false);
+
   const [budgetOptimizationMessage, setBudgetOptimizationMessage] =
     useState("");
 
   const [replacingActivity, setReplacingActivity] = useState(null);
 
   const [fixingConflict, setFixingConflict] = useState(false);
+
   const [conflictFixMessage, setConflictFixMessage] = useState("");
 
   const [appError, setAppError] = useState("");
@@ -74,11 +84,13 @@ function App() {
     if (formData.interests.includes(interest)) {
       setFormData({
         ...formData,
+
         interests: formData.interests.filter((item) => item !== interest),
       });
     } else {
       setFormData({
         ...formData,
+
         interests: [...formData.interests, interest],
       });
     }
@@ -101,16 +113,25 @@ function App() {
     if (loading) return;
 
     setLoading(true);
+
     setAppError("");
+
+    setFallbackMode(false);
+
+    setFallbackMessage("");
+
     setBudgetOptimizationMessage("");
+
     setConflictFixMessage("");
 
     try {
       const response = await fetch(`${API_URL}/api/generate-trip`, {
         method: "POST",
+
         headers: {
           "Content-Type": "application/json",
         },
+
         body: JSON.stringify(formData),
       });
 
@@ -126,9 +147,20 @@ function App() {
       const data = await response.json();
 
       setItinerary(data.days || []);
+
+      setFallbackMode(Boolean(data.fallback));
+
+      if (data.fallback) {
+        setFallbackMessage(
+          data.message ||
+            "TravelPilot is using demo fallback mode because the AI service is temporarily unavailable.",
+        );
+      }
+
       setTripGenerated(true);
     } catch (error) {
       console.error("Generate trip error:", error);
+
       setAppError(error.message);
     } finally {
       setLoading(false);
@@ -140,11 +172,14 @@ function App() {
   // =====================================
 
   const handleCancelActivity = async (dayIndex, activityIndex) => {
-    if (replacingActivity !== null) return;
+    if (replacingActivity !== null) {
+      return;
+    }
 
     const activityKey = `${dayIndex}-${activityIndex}`;
 
     setReplacingActivity(activityKey);
+
     setAppError("");
 
     try {
@@ -163,10 +198,15 @@ function App() {
 
         body: JSON.stringify({
           destination: formData.destination,
+
           interests: formData.interests,
+
           travelPace: formData.travelPace,
+
           budget: formData.budget,
+
           cancelledActivity,
+
           currentDayActivities,
         }),
       });
@@ -181,6 +221,14 @@ function App() {
       }
 
       const data = await response.json();
+
+      if (data.fallback) {
+        setFallbackMode(true);
+
+        setFallbackMessage(
+          "TravelPilot used fallback mode for this replacement because Gemini quota is temporarily unavailable.",
+        );
+      }
 
       const updatedItinerary = itinerary.map((day, currentDayIndex) => {
         if (currentDayIndex !== dayIndex) {
@@ -197,7 +245,9 @@ function App() {
 
             return {
               ...data.replacement,
+
               replaced: true,
+
               originalActivity: cancelledActivity.name,
             };
           }),
@@ -207,6 +257,7 @@ function App() {
       setItinerary(updatedItinerary);
     } catch (error) {
       console.error("Replan error:", error);
+
       setAppError(error.message);
     } finally {
       setReplacingActivity(null);
@@ -236,11 +287,17 @@ function App() {
 
         body: JSON.stringify({
           message: messageToSend,
+
           destination: formData.destination,
+
           hotel: formData.hotel,
+
           budget: formData.budget,
+
           interests: formData.interests,
+
           travelPace: formData.travelPace,
+
           itinerary,
         }),
       });
@@ -257,9 +314,11 @@ function App() {
       const data = await response.json();
 
       setChatAnswer(data.answer);
+
       setChatMessage("");
     } catch (error) {
       console.error("Chat error:", error);
+
       setChatAnswer(error.message);
     } finally {
       setChatLoading(false);
@@ -296,7 +355,9 @@ function App() {
     if (budgetOptimizing) return;
 
     setBudgetOptimizing(true);
+
     setBudgetOptimizationMessage("");
+
     setAppError("");
 
     try {
@@ -309,9 +370,13 @@ function App() {
 
         body: JSON.stringify({
           destination: formData.destination,
+
           budget: formData.budget,
+
           interests: formData.interests,
+
           travelPace: formData.travelPace,
+
           itinerary,
         }),
       });
@@ -358,6 +423,7 @@ function App() {
     }
 
     const rawTime = parts[0];
+
     const modifier = parts[1].toUpperCase();
 
     let [hours, minutes] = rawTime.split(":").map(Number);
@@ -379,6 +445,7 @@ function App() {
 
   const minutesToTime = (minutes) => {
     let hours = Math.floor(minutes / 60);
+
     const mins = minutes % 60;
 
     const modifier = hours >= 12 ? "PM" : "AM";
@@ -404,9 +471,11 @@ function App() {
 
       for (let i = 0; i < activities.length - 1; i++) {
         const current = activities[i];
+
         const next = activities[i + 1];
 
         const currentStart = convertToMinutes(current.time);
+
         const nextStart = convertToMinutes(next.time);
 
         const durationMinutes = Number(current.durationMinutes || 60);
@@ -420,13 +489,21 @@ function App() {
         if (currentStart > 0 && nextStart > 0 && earliestArrival > nextStart) {
           conflicts.push({
             dayIndex,
+
             dayNumber: day.day,
+
             firstActivity: current.name,
+
             secondActivity: next.name,
+
             currentEnd,
+
             travelToNext,
+
             nextStart,
+
             earliestArrival,
+
             conflictMinutes: earliestArrival - nextStart,
           });
         }
@@ -446,7 +523,9 @@ function App() {
     if (fixingConflict) return;
 
     setFixingConflict(true);
+
     setConflictFixMessage("");
+
     setAppError("");
 
     try {
@@ -475,11 +554,17 @@ function App() {
 
         body: JSON.stringify({
           destination: formData.destination,
+
           budget: formData.budget,
+
           interests: formData.interests,
+
           travelPace: formData.travelPace,
+
           dayNumber: day.day,
+
           conflictingActivities,
+
           currentDayActivities: day.activities,
         }),
       });
@@ -502,6 +587,7 @@ function App() {
 
         return {
           ...currentDay,
+
           activities: data.updatedActivities || currentDay.activities,
         };
       });
@@ -545,6 +631,7 @@ function App() {
             className="edit-trip-button"
             onClick={() => {
               setTripGenerated(false);
+
               setAppError("");
             }}
           >
@@ -552,9 +639,18 @@ function App() {
           </button>
         </header>
 
+        {fallbackMode && (
+          <div className="fallback-notice">
+            <strong>⚡ Demo Fallback Mode</strong>
+
+            <p>{fallbackMessage}</p>
+          </div>
+        )}
+
         {appError && (
           <div className="app-error">
             <strong>⚠ TravelPilot Error</strong>
+
             <p>{appError}</p>
 
             <button onClick={() => setAppError("")}>Dismiss</button>
@@ -564,11 +660,13 @@ function App() {
         <div className="trip-summary">
           <div className="summary-card">
             <span>Budget</span>
+
             <strong>₹{Number(formData.budget).toLocaleString()}</strong>
           </div>
 
           <div className="summary-card">
             <span>Hotel Area</span>
+
             <strong>{formData.hotel || "Not selected"}</strong>
           </div>
 
@@ -586,11 +684,13 @@ function App() {
         <div className="budget-summary">
           <div className="budget-stat">
             <span>Estimated Activities</span>
+
             <strong>₹{totalCost.toLocaleString()}</strong>
           </div>
 
           <div className="budget-stat">
             <span>Trip Budget</span>
+
             <strong>₹{budgetAmount.toLocaleString()}</strong>
           </div>
 
@@ -678,6 +778,7 @@ function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">YOUR TRIP</p>
+
                 <h2>Day-by-day itinerary</h2>
               </div>
             </div>
@@ -686,12 +787,14 @@ function App() {
               <div className="day-card" key={day.day}>
                 <div className="day-heading">
                   <div className="day-number">Day {day.day}</div>
+
                   <h3>{day.title}</h3>
                 </div>
 
                 <div className="activity-list">
                   {(day.activities || []).map((activity, index) => {
                     const activityKey = `${dayIndex}-${index}`;
+
                     const isReplacing = replacingActivity === activityKey;
 
                     return (
@@ -804,6 +907,7 @@ function App() {
             {chatAnswer && (
               <div className="chat-answer">
                 <strong>TravelPilot</strong>
+
                 <p>{chatAnswer}</p>
               </div>
             )}
@@ -835,6 +939,7 @@ function App() {
         {appError && (
           <div className="app-error form-error">
             <strong>⚠ TravelPilot Error</strong>
+
             <p>{appError}</p>
 
             <button onClick={() => setAppError("")}>Dismiss</button>
@@ -934,8 +1039,11 @@ function App() {
                 onClick={() => selectTravelPace(pace)}
               >
                 {pace === "Relaxed" && "🌿 "}
+
                 {pace === "Balanced" && "⚖️ "}
+
                 {pace === "Packed" && "⚡ "}
+
                 {pace}
               </button>
             ))}

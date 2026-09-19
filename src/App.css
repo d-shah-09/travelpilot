@@ -854,3 +854,69 @@ textarea {
   color: #ffffff !important;
   background: #2563eb;
 }
+.fallback-notice {
+  max-width: 1400px;
+  margin: 0 auto 20px;
+  padding: 14px 16px;
+  background: #fff8e6;
+  border: 1px solid #f4cf73;
+  border-radius: 12px;
+}
+
+.fallback-notice strong {
+  color: #946200;
+}
+
+.fallback-notice p {
+  margin: 5px 0 0;
+  color: #765b26;
+  font-size: 13px;
+  line-height: 1.5;
+}
+/* Dashboard text visibility fixes */
+
+.dashboard-page h1,
+.dashboard-page h2,
+.dashboard-page h3,
+.dashboard-page h4,
+.dashboard-page p,
+.dashboard-page span,
+.dashboard-page button {
+  color: #111827;
+}
+
+.dashboard-header h1 {
+  color: #111827 !important;
+}
+
+.section-heading h2 {
+  color: #111827 !important;
+}
+
+.assistant-panel button {
+  color: #111827 !important;
+  background: #f8fafc;
+}
+
+.assistant-panel button:hover {
+  background: #eef2f7;
+}
+
+.chat-box button {
+  color: #ffffff !important;
+  background: #2563eb !important;
+}
+
+.edit-trip-button {
+  color: #111827 !important;
+}
+
+.eyebrow {
+  color: #2563eb !important;
+}
+
+.dashboard-subtitle,
+.assistant-text,
+.activity-details p {
+  color: #64748b !important;
+}

@@ -10,7 +10,7 @@ dotenv.config();
 // =====================================
 
 if (!process.env.GEMINI_API_KEY) {
-  console.error("ERROR: GEMINI_API_KEY is missing from .env");
+  console.error("ERROR: GEMINI_API_KEY is missing from environment variables.");
   process.exit(1);
 }
 
@@ -27,6 +27,143 @@ const ai = new GoogleGenAI({
 // HELPERS
 // =====================================
 
+const isRateLimitError = (error) => {
+  return (
+    error?.status === 429 ||
+    error?.code === 429 ||
+    error?.message?.includes("RESOURCE_EXHAUSTED") ||
+    error?.message?.includes("429")
+  );
+};
+
+// =====================================
+// FALLBACK TRIP GENERATOR
+// =====================================
+
+const createFallbackTrip = ({
+  destination,
+  startDate,
+  endDate,
+  budget,
+  hotel,
+  interests = [],
+  travelPace = "Balanced",
+  mustVisit = "",
+}) => {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  const millisecondsPerDay = 1000 * 60 * 60 * 24;
+
+  let numberOfDays =
+    Math.floor((end.getTime() - start.getTime()) / millisecondsPerDay) + 1;
+
+  if (!Number.isFinite(numberOfDays) || numberOfDays < 1) {
+    numberOfDays = 1;
+  }
+
+  // Prevent huge fallback itineraries.
+  numberOfDays = Math.min(numberOfDays, 10);
+
+  const totalBudget = Number(budget) || 10000;
+
+  const dailyBudget = Math.max(500, Math.floor(totalBudget / numberOfDays));
+
+  const preferredCategory = interests[0] || "Sightseeing";
+
+  const templates = [
+    {
+      time: "09:00 AM",
+      name: `${destination} Local Highlights`,
+      location: hotel || destination,
+      costRatio: 0.12,
+      category: preferredCategory,
+      durationMinutes: 120,
+      travelMinutesFromPrevious: 0,
+    },
+
+    {
+      time: "12:00 PM",
+      name: "Local Food Experience",
+      location: destination,
+      costRatio: 0.1,
+      category: "Food",
+      durationMinutes: 90,
+      travelMinutesFromPrevious: 30,
+    },
+
+    {
+      time: "03:00 PM",
+      name: mustVisit || `${destination} Cultural Experience`,
+      location: destination,
+      costRatio: 0.12,
+      category: "Culture",
+      durationMinutes: 120,
+      travelMinutesFromPrevious: 30,
+    },
+
+    {
+      time: "06:30 PM",
+      name: `${destination} Evening Experience`,
+      location: destination,
+      costRatio: 0.08,
+      category: preferredCategory,
+      durationMinutes: 120,
+      travelMinutesFromPrevious: 30,
+    },
+  ];
+
+  let activitiesPerDay = 3;
+
+  if (travelPace === "Relaxed") {
+    activitiesPerDay = 2;
+  }
+
+  if (travelPace === "Packed") {
+    activitiesPerDay = 4;
+  }
+
+  const days = Array.from({ length: numberOfDays }, (_, dayIndex) => ({
+    day: dayIndex + 1,
+
+    title: `Explore ${destination} — Day ${dayIndex + 1}`,
+
+    activities: templates
+      .slice(0, activitiesPerDay)
+      .map((activity, activityIndex) => ({
+        time: activity.time,
+
+        name:
+          dayIndex === 0
+            ? activity.name
+            : `${activity.name} — Day ${dayIndex + 1}`,
+
+        location: activity.location,
+
+        cost: Math.round(dailyBudget * activity.costRatio),
+
+        category: activity.category,
+
+        durationMinutes: activity.durationMinutes,
+
+        travelMinutesFromPrevious:
+          activityIndex === 0 ? 0 : activity.travelMinutesFromPrevious,
+      })),
+  }));
+
+  return {
+    days,
+
+    fallback: true,
+
+    fallbackReason: "Gemini quota is temporarily unavailable.",
+  };
+};
+
+// =====================================
+// STANDARD ERROR RESPONSE
+// =====================================
+
 const sendError = (res, status, code, message) => {
   return res.status(status).json({
     success: false,
@@ -34,6 +171,10 @@ const sendError = (res, status, code, message) => {
     message,
   });
 };
+
+// =====================================
+// REQUIRED FIELD VALIDATION
+// =====================================
 
 const validateRequiredFields = (body, fields) => {
   return fields.filter((field) => {
@@ -47,6 +188,10 @@ const validateRequiredFields = (body, fields) => {
     );
   });
 };
+
+// =====================================
+// GEMINI JSON PARSER
+// =====================================
 
 const parseGeminiJson = (text) => {
   if (!text || typeof text !== "string") {
@@ -62,26 +207,26 @@ const parseGeminiJson = (text) => {
     return JSON.parse(cleanText);
   } catch (error) {
     console.error("Invalid Gemini JSON response:");
+
     console.error(cleanText);
 
     throw new Error("INVALID_GEMINI_JSON");
   }
 };
 
+// =====================================
+// GEMINI ERROR HANDLER
+// =====================================
+
 const handleGeminiError = (error, res) => {
   console.error("Gemini/API error:", error);
 
-  if (
-    error?.status === 429 ||
-    error?.code === 429 ||
-    error?.message?.includes("RESOURCE_EXHAUSTED") ||
-    error?.message?.includes("429")
-  ) {
+  if (isRateLimitError(error)) {
     return sendError(
       res,
       429,
       "AI_RATE_LIMIT",
-      "TravelPilot is temporarily busy. Please wait about a minute and try again.",
+      "TravelPilot AI quota is temporarily unavailable.",
     );
   }
 
@@ -246,8 +391,26 @@ Return exactly:
       throw new Error("INVALID_GEMINI_JSON");
     }
 
-    return res.json(itinerary);
+    return res.json({
+      ...itinerary,
+      fallback: false,
+    });
   } catch (error) {
+    console.error("Generate trip error:", error);
+
+    if (isRateLimitError(error)) {
+      console.log("Gemini quota reached. Using fallback itinerary.");
+
+      const fallbackTrip = createFallbackTrip(req.body);
+
+      return res.status(200).json({
+        ...fallbackTrip,
+
+        message:
+          "Gemini quota is temporarily unavailable, so TravelPilot switched to demo fallback mode.",
+      });
+    }
+
     return handleGeminiError(error, res);
   }
 });
@@ -350,8 +513,56 @@ Return exactly:
       throw new Error("INVALID_GEMINI_JSON");
     }
 
-    return res.json(result);
+    return res.json({
+      ...result,
+      fallback: false,
+    });
   } catch (error) {
+    console.error("Replan error:", error);
+
+    if (isRateLimitError(error)) {
+      const {
+        cancelledActivity,
+        currentDayActivities = [],
+        interests = [],
+        destination,
+      } = req.body;
+
+      const replacement = {
+        time: cancelledActivity?.time || "02:00 PM",
+
+        name: cancelledActivity?.category
+          ? `Alternative ${cancelledActivity.category} Experience`
+          : "Alternative Local Experience",
+
+        location:
+          cancelledActivity?.location ||
+          currentDayActivities[0]?.location ||
+          destination,
+
+        cost: Math.max(
+          0,
+          Math.round(Number(cancelledActivity?.cost || 500) * 0.8),
+        ),
+
+        category: cancelledActivity?.category || interests[0] || "Sightseeing",
+
+        durationMinutes: Number(cancelledActivity?.durationMinutes) || 90,
+
+        travelMinutesFromPrevious:
+          Number(cancelledActivity?.travelMinutesFromPrevious) || 20,
+
+        reason:
+          "TravelPilot selected a fallback alternative because the AI service quota is temporarily unavailable.",
+      };
+
+      return res.status(200).json({
+        replacement,
+        fallback: true,
+        fallbackReason: "Gemini quota temporarily unavailable",
+      });
+    }
+
     return handleGeminiError(error, res);
   }
 });
@@ -716,7 +927,7 @@ app.use((err, req, res, next) => {
 });
 
 // =====================================
-// START SERVER
+// EXPORT / LOCAL SERVER
 // =====================================
 
 export default app;
