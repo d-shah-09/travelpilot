@@ -796,3 +796,61 @@ textarea {
   font-size: 13px;
   line-height: 1.5;
 }
+/* Fix text visibility on the trip form */
+
+.trip-card {
+  color: #111827;
+}
+
+.trip-card h1,
+.trip-card h2,
+.trip-card h3,
+.trip-card p,
+.trip-card label {
+  color: #111827;
+}
+
+.trip-card .tagline,
+.trip-card .subtitle,
+.trip-card .pace-description p,
+.trip-card .field-help {
+  color: #6b7280;
+}
+
+/* Inputs */
+
+.trip-card input,
+.trip-card textarea {
+  color: #111827 !important;
+  background: #ffffff !important;
+}
+
+.trip-card input::placeholder,
+.trip-card textarea::placeholder {
+  color: #9ca3af !important;
+  opacity: 1;
+}
+
+/* Interest buttons */
+
+.interest {
+  color: #111827 !important;
+  background: #ffffff;
+}
+
+.interest.active {
+  color: #ffffff !important;
+  background: #2563eb;
+}
+
+/* Travel pace buttons */
+
+.pace-button {
+  color: #111827 !important;
+  background: #ffffff;
+}
+
+.pace-button.active {
+  color: #ffffff !important;
+  background: #2563eb;
+}
