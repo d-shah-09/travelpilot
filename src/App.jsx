@@ -13,6 +13,11 @@ function App() {
     interests: [],
     travelPace: "Balanced",
     mustVisit: "",
+    transportType: "",
+    transportDetails: "",
+    transportStatus: "Planned",
+    accommodationBookingRef: "",
+    accommodationStatus: "Planned",
   });
 
   const [tripGenerated, setTripGenerated] = useState(false);
@@ -43,6 +48,19 @@ function App() {
   const [conflictFixMessage, setConflictFixMessage] = useState("");
 
   const [appError, setAppError] = useState("");
+
+  const [tripId, setTripId] = useState(null);
+  const [transportation, setTransportation] = useState({});
+  const [accommodation, setAccommodation] = useState({});
+  const [realWorldStatus, setRealWorldStatus] = useState({});
+
+  const [weatherAdapting, setWeatherAdapting] = useState(false);
+  const [weatherMessage, setWeatherMessage] = useState("");
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [tripHistory, setTripHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyMessage, setHistoryMessage] = useState("");
 
   const interests = [
     "Food",
@@ -147,6 +165,10 @@ function App() {
       const data = await response.json();
 
       setItinerary(data.days || []);
+      setTripId(data.tripId || null);
+      setTransportation(data.transportation || {});
+      setAccommodation(data.accommodation || {});
+      setRealWorldStatus(data.realWorldStatus || {});
 
       setFallbackMode(Boolean(data.fallback));
 
@@ -608,8 +630,167 @@ function App() {
   };
 
   // =====================================
+  // WEATHER DISRUPTION
+  // =====================================
+
+  const highWeatherRisk = itinerary.some((day) => day.weather?.risk === "high");
+
+  const handleAdaptWeather = async () => {
+    if (weatherAdapting) return;
+
+    setWeatherAdapting(true);
+    setWeatherMessage("");
+
+    try {
+      const response = await fetch(`${API_URL}/api/adapt-weather`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          destination: formData.destination,
+          itinerary,
+        }),
+      });
+
+      if (!response.ok) {
+        const message = await getApiErrorMessage(
+          response,
+          "Could not adapt the itinerary for weather.",
+        );
+        throw new Error(message);
+      }
+
+      const data = await response.json();
+      setItinerary(data.days || itinerary);
+      setWeatherMessage(data.message || "Itinerary adapted for weather.");
+    } catch (error) {
+      setWeatherMessage(error.message);
+    } finally {
+      setWeatherAdapting(false);
+    }
+  };
+
+  // =====================================
+  // TRIP HISTORY
+  // =====================================
+
+  const loadTripHistory = async () => {
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryMessage("");
+
+    try {
+      const response = await fetch(`${API_URL}/api/trips`);
+
+      if (!response.ok) {
+        const message = await getApiErrorMessage(
+          response,
+          "Could not load trip history.",
+        );
+        throw new Error(message);
+      }
+
+      const data = await response.json();
+      setTripHistory(data.trips || []);
+
+      if (!data.configured) {
+        setHistoryMessage(data.message || "Supabase is not configured.");
+      }
+    } catch (error) {
+      setHistoryMessage(error.message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const loadSavedTrip = (trip) => {
+    setFormData({
+      ...formData,
+      destination: trip.destination || "",
+      startDate: trip.start_date || "",
+      endDate: trip.end_date || "",
+      budget: String(trip.budget || ""),
+      hotel: trip.hotel || trip.accommodation?.name || "",
+      interests: trip.interests || [],
+      travelPace: trip.travel_pace || "Balanced",
+      mustVisit: trip.must_visit || "",
+      transportType: trip.transportation?.type || "",
+      transportDetails: trip.transportation?.details || "",
+      transportStatus: trip.transportation?.status || "Planned",
+      accommodationBookingRef: trip.accommodation?.bookingRef || "",
+      accommodationStatus: trip.accommodation?.status || "Planned",
+    });
+
+    setItinerary(trip.itinerary || []);
+    setTripId(trip.id || null);
+    setTransportation(trip.transportation || {});
+    setAccommodation(trip.accommodation || {});
+    setRealWorldStatus(trip.real_world_status || {});
+    setFallbackMode(Boolean(trip.fallback));
+    setFallbackMessage(
+      trip.fallback
+        ? "This saved trip was created while TravelPilot was in fallback mode."
+        : "",
+    );
+    setTripGenerated(true);
+    setHistoryOpen(false);
+  };
+
+  const IntegrationBadge = ({ label, value }) => (
+    <span
+      className={`integration-badge ${
+        value === "enabled" ? "integration-on" : "integration-off"
+      }`}
+    >
+      {label}: {value === "enabled" ? "Live" : "Not configured"}
+    </span>
+  );
+
+  // =====================================
   // DASHBOARD
   // =====================================
+
+  if (historyOpen) {
+    return (
+      <div className="history-page">
+        <div className="history-header">
+          <div>
+            <p className="dashboard-logo">✈ TravelPilot</p>
+            <h1>Trip History</h1>
+          </div>
+
+          <button
+            className="edit-trip-button"
+            onClick={() => setHistoryOpen(false)}
+          >
+            Back
+          </button>
+        </div>
+
+        {historyLoading && <p>Loading saved trips...</p>}
+
+        {historyMessage && (
+          <div className="history-message">{historyMessage}</div>
+        )}
+
+        <div className="history-grid">
+          {tripHistory.map((trip) => (
+            <button
+              className="history-card"
+              key={trip.id}
+              onClick={() => loadSavedTrip(trip)}
+            >
+              <strong>{trip.destination}</strong>
+              <span>
+                {trip.start_date} → {trip.end_date}
+              </span>
+              <span>₹{Number(trip.budget || 0).toLocaleString()}</span>
+              <span>{trip.hotel || "No hotel area"}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (tripGenerated) {
     return (
@@ -627,17 +808,36 @@ function App() {
             </p>
           </div>
 
-          <button
-            className="edit-trip-button"
-            onClick={() => {
-              setTripGenerated(false);
+          <div className="header-actions">
+            <button className="edit-trip-button" onClick={loadTripHistory}>
+              Trip History
+            </button>
 
-              setAppError("");
-            }}
-          >
-            Edit Trip
-          </button>
+            <button
+              className="edit-trip-button"
+              onClick={() => {
+                setTripGenerated(false);
+
+                setAppError("");
+              }}
+            >
+              Edit Trip
+            </button>
+          </div>
         </header>
+
+        <div className="integration-strip">
+          <IntegrationBadge label="Places" value={realWorldStatus.places} />
+          <IntegrationBadge
+            label="Travel time"
+            value={realWorldStatus.routes}
+          />
+          <IntegrationBadge label="Weather" value={realWorldStatus.weather} />
+          <IntegrationBadge
+            label="Trip history"
+            value={realWorldStatus.database}
+          />
+        </div>
 
         {fallbackMode && (
           <div className="fallback-notice">
@@ -655,6 +855,24 @@ function App() {
 
             <button onClick={() => setAppError("")}>Dismiss</button>
           </div>
+        )}
+
+        {highWeatherRisk && (
+          <div className="weather-alert">
+            <div>
+              <strong>⛈ Weather disruption risk detected</strong>
+              <p>
+                TravelPilot can replace weather-sensitive outdoor activities.
+              </p>
+            </div>
+            <button onClick={handleAdaptWeather} disabled={weatherAdapting}>
+              {weatherAdapting ? "Adapting..." : "Adapt Itinerary"}
+            </button>
+          </div>
+        )}
+
+        {weatherMessage && (
+          <div className="weather-result">☁ {weatherMessage}</div>
         )}
 
         <div className="trip-summary">
@@ -678,6 +896,34 @@ function App() {
                 ? formData.interests.join(", ")
                 : "General"}
             </strong>
+          </div>
+        </div>
+
+        <div className="logistics-grid">
+          <div className="logistics-card">
+            <span>Transportation</span>
+            <strong>{transportation.type || "Not added"}</strong>
+            <p>{transportation.details || "No transport details"}</p>
+            <small>Status: {transportation.status || "Planned"}</small>
+          </div>
+
+          <div className="logistics-card">
+            <span>Accommodation</span>
+            <strong>
+              {accommodation.name || formData.hotel || "Not added"}
+            </strong>
+            <p>Booking ref: {accommodation.bookingRef || "Not added"}</p>
+            <small>Status: {accommodation.status || "Planned"}</small>
+          </div>
+
+          <div className="logistics-card">
+            <span>Saved Trip</span>
+            <strong>{tripId ? "Saved to history" : "Not saved"}</strong>
+            <p>
+              {tripId
+                ? "Stored in Supabase."
+                : "Configure Supabase to enable persistent history."}
+            </p>
           </div>
         </div>
 
@@ -789,6 +1035,18 @@ function App() {
                   <div className="day-number">Day {day.day}</div>
 
                   <h3>{day.title}</h3>
+
+                  {day.weather && (
+                    <div className={`weather-chip weather-${day.weather.risk}`}>
+                      <strong>{day.weather.summary}</strong>
+                      {!day.weather.unavailable && (
+                        <span>
+                          {day.weather.minTempC}°–{day.weather.maxTempC}°C ·
+                          Rain {day.weather.precipitationProbability ?? "?"}%
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="activity-list">
@@ -808,6 +1066,23 @@ function App() {
 
                           {activity.category && <p>🏷 {activity.category}</p>}
 
+                          {activity.realPlaceVerified && (
+                            <p className="verified-place">
+                              ✓ Real place verified
+                              {activity.rating
+                                ? ` · ⭐ ${activity.rating}`
+                                : ""}
+                            </p>
+                          )}
+
+                          {activity.openingHoursLabel && (
+                            <p
+                              className={`opening-status opening-${activity.openingHoursStatus}`}
+                            >
+                              🕒 {activity.openingHoursLabel}
+                            </p>
+                          )}
+
                           {activity.durationMinutes && (
                             <p>⏱ {activity.durationMinutes} min</p>
                           )}
@@ -816,6 +1091,30 @@ function App() {
                             <p>
                               🚗 {activity.travelMinutesFromPrevious} min from
                               previous stop
+                            </p>
+                          )}
+
+                          {activity.mapUrl && (
+                            <a
+                              className="map-link"
+                              href={activity.mapUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Open in Google Maps ↗
+                            </a>
+                          )}
+
+                          {activity.weatherDisruption && (
+                            <p className="weather-activity-warning">
+                              ⛈ Outdoor activity may be disrupted by weather.
+                            </p>
+                          )}
+
+                          {activity.weatherAdjusted && (
+                            <p className="weather-adjusted">
+                              ☂ Weather-adjusted:{" "}
+                              {activity.weatherAdjustmentReason}
                             </p>
                           )}
 
@@ -924,6 +1223,16 @@ function App() {
   return (
     <div className="app">
       <div className="trip-card">
+        <div className="form-top-actions">
+          <button
+            type="button"
+            className="history-button"
+            onClick={loadTripHistory}
+          >
+            Trip History
+          </button>
+        </div>
+
         <div className="logo">
           ✈ <span>TravelPilot</span>
         </div>
@@ -1004,6 +1313,85 @@ function App() {
             value={formData.hotel}
             onChange={handleChange}
           />
+
+          <div className="form-section">
+            <h3>Transportation tracking</h3>
+
+            <div className="date-row">
+              <div>
+                <label>Transport Type</label>
+                <select
+                  name="transportType"
+                  value={formData.transportType}
+                  onChange={handleChange}
+                >
+                  <option value="">Select</option>
+                  <option value="Flight">Flight</option>
+                  <option value="Train">Train</option>
+                  <option value="Bus">Bus</option>
+                  <option value="Car">Car</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
+              <div>
+                <label>Status</label>
+                <select
+                  name="transportStatus"
+                  value={formData.transportStatus}
+                  onChange={handleChange}
+                >
+                  <option>Planned</option>
+                  <option>Booked</option>
+                  <option>Confirmed</option>
+                  <option>Completed</option>
+                  <option>Cancelled</option>
+                </select>
+              </div>
+            </div>
+
+            <label>Transport Details</label>
+            <input
+              type="text"
+              name="transportDetails"
+              placeholder="e.g. AI 101, 08:30 departure"
+              value={formData.transportDetails}
+              onChange={handleChange}
+            />
+          </div>
+
+          <div className="form-section">
+            <h3>Accommodation tracking</h3>
+
+            <div className="date-row">
+              <div>
+                <label>Booking Reference</label>
+                <input
+                  type="text"
+                  name="accommodationBookingRef"
+                  placeholder="Optional"
+                  value={formData.accommodationBookingRef}
+                  onChange={handleChange}
+                />
+              </div>
+
+              <div>
+                <label>Status</label>
+                <select
+                  name="accommodationStatus"
+                  value={formData.accommodationStatus}
+                  onChange={handleChange}
+                >
+                  <option>Planned</option>
+                  <option>Booked</option>
+                  <option>Confirmed</option>
+                  <option>Checked in</option>
+                  <option>Completed</option>
+                  <option>Cancelled</option>
+                </select>
+              </div>
+            </div>
+          </div>
 
           <label>What are you interested in?</label>
 

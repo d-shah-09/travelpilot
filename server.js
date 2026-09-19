@@ -1,23 +1,50 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+
 import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
+
+import {
+  googlePlacesSearch,
+  enrichItinerary,
+  getWeatherForecast,
+  attachWeatherToDays,
+  flagWeatherDisruptions,
+  adaptTripForWeather,
+  saveTripToSupabase,
+  getTripHistory,
+  updateTripLogistics,
+  supabaseConfigured,
+  buildTransportation,
+  buildAccommodation,
+  getIntegrationStatus,
+} from "./integrations.js";
 
 // =====================================
 // ENVIRONMENT CHECK
 // =====================================
 
 if (!process.env.GEMINI_API_KEY) {
-  console.error("ERROR: GEMINI_API_KEY is missing from environment variables.");
+  console.error("ERROR: GEMINI_API_KEY is missing.");
+
   process.exit(1);
 }
+
+// =====================================
+// EXPRESS
+// =====================================
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+
+app.use(
+  express.json({
+    limit: "2mb",
+  }),
+);
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -27,157 +54,21 @@ const ai = new GoogleGenAI({
 // HELPERS
 // =====================================
 
-const isRateLimitError = (error) => {
-  return (
-    error?.status === 429 ||
-    error?.code === 429 ||
-    error?.message?.includes("RESOURCE_EXHAUSTED") ||
-    error?.message?.includes("429")
-  );
-};
+const isRateLimitError = (error) =>
+  error?.status === 429 ||
+  error?.code === 429 ||
+  error?.message?.includes("RESOURCE_EXHAUSTED") ||
+  error?.message?.includes("429");
 
-// =====================================
-// FALLBACK TRIP GENERATOR
-// =====================================
-
-const createFallbackTrip = ({
-  destination,
-  startDate,
-  endDate,
-  budget,
-  hotel,
-  interests = [],
-  travelPace = "Balanced",
-  mustVisit = "",
-}) => {
-  const start = new Date(startDate);
-  const end = new Date(endDate);
-
-  const millisecondsPerDay = 1000 * 60 * 60 * 24;
-
-  let numberOfDays =
-    Math.floor((end.getTime() - start.getTime()) / millisecondsPerDay) + 1;
-
-  if (!Number.isFinite(numberOfDays) || numberOfDays < 1) {
-    numberOfDays = 1;
-  }
-
-  // Prevent huge fallback itineraries.
-  numberOfDays = Math.min(numberOfDays, 10);
-
-  const totalBudget = Number(budget) || 10000;
-
-  const dailyBudget = Math.max(500, Math.floor(totalBudget / numberOfDays));
-
-  const preferredCategory = interests[0] || "Sightseeing";
-
-  const templates = [
-    {
-      time: "09:00 AM",
-      name: `${destination} Local Highlights`,
-      location: hotel || destination,
-      costRatio: 0.12,
-      category: preferredCategory,
-      durationMinutes: 120,
-      travelMinutesFromPrevious: 0,
-    },
-
-    {
-      time: "12:00 PM",
-      name: "Local Food Experience",
-      location: destination,
-      costRatio: 0.1,
-      category: "Food",
-      durationMinutes: 90,
-      travelMinutesFromPrevious: 30,
-    },
-
-    {
-      time: "03:00 PM",
-      name: mustVisit || `${destination} Cultural Experience`,
-      location: destination,
-      costRatio: 0.12,
-      category: "Culture",
-      durationMinutes: 120,
-      travelMinutesFromPrevious: 30,
-    },
-
-    {
-      time: "06:30 PM",
-      name: `${destination} Evening Experience`,
-      location: destination,
-      costRatio: 0.08,
-      category: preferredCategory,
-      durationMinutes: 120,
-      travelMinutesFromPrevious: 30,
-    },
-  ];
-
-  let activitiesPerDay = 3;
-
-  if (travelPace === "Relaxed") {
-    activitiesPerDay = 2;
-  }
-
-  if (travelPace === "Packed") {
-    activitiesPerDay = 4;
-  }
-
-  const days = Array.from({ length: numberOfDays }, (_, dayIndex) => ({
-    day: dayIndex + 1,
-
-    title: `Explore ${destination} — Day ${dayIndex + 1}`,
-
-    activities: templates
-      .slice(0, activitiesPerDay)
-      .map((activity, activityIndex) => ({
-        time: activity.time,
-
-        name:
-          dayIndex === 0
-            ? activity.name
-            : `${activity.name} — Day ${dayIndex + 1}`,
-
-        location: activity.location,
-
-        cost: Math.round(dailyBudget * activity.costRatio),
-
-        category: activity.category,
-
-        durationMinutes: activity.durationMinutes,
-
-        travelMinutesFromPrevious:
-          activityIndex === 0 ? 0 : activity.travelMinutesFromPrevious,
-      })),
-  }));
-
-  return {
-    days,
-
-    fallback: true,
-
-    fallbackReason: "Gemini quota is temporarily unavailable.",
-  };
-};
-
-// =====================================
-// STANDARD ERROR RESPONSE
-// =====================================
-
-const sendError = (res, status, code, message) => {
-  return res.status(status).json({
+const sendError = (res, status, code, message) =>
+  res.status(status).json({
     success: false,
     error: code,
     message,
   });
-};
 
-// =====================================
-// REQUIRED FIELD VALIDATION
-// =====================================
-
-const validateRequiredFields = (body, fields) => {
-  return fields.filter((field) => {
+const validateRequiredFields = (body, fields) =>
+  fields.filter((field) => {
     const value = body[field];
 
     return (
@@ -187,11 +78,6 @@ const validateRequiredFields = (body, fields) => {
       (Array.isArray(value) && value.length === 0)
     );
   });
-};
-
-// =====================================
-// GEMINI JSON PARSER
-// =====================================
 
 const parseGeminiJson = (text) => {
   if (!text || typeof text !== "string") {
@@ -205,18 +91,12 @@ const parseGeminiJson = (text) => {
 
   try {
     return JSON.parse(cleanText);
-  } catch (error) {
-    console.error("Invalid Gemini JSON response:");
-
+  } catch {
     console.error(cleanText);
 
     throw new Error("INVALID_GEMINI_JSON");
   }
 };
-
-// =====================================
-// GEMINI ERROR HANDLER
-// =====================================
 
 const handleGeminiError = (error, res) => {
   console.error("Gemini/API error:", error);
@@ -235,21 +115,7 @@ const handleGeminiError = (error, res) => {
       res,
       502,
       "INVALID_AI_RESPONSE",
-      "TravelPilot received an invalid response from the AI service. Please try again.",
-    );
-  }
-
-  if (
-    error?.status === 401 ||
-    error?.status === 403 ||
-    error?.message?.toLowerCase()?.includes("api key") ||
-    error?.message?.includes("API_KEY")
-  ) {
-    return sendError(
-      res,
-      500,
-      "AI_AUTH_ERROR",
-      "TravelPilot could not authenticate with the AI service.",
+      "TravelPilot received an invalid AI response.",
     );
   }
 
@@ -262,13 +128,173 @@ const handleGeminiError = (error, res) => {
 };
 
 // =====================================
-// TEST SERVER
+// FALLBACK TRIP
+// =====================================
+
+const createFallbackTrip = ({
+  destination,
+  startDate,
+  endDate,
+  budget,
+  hotel,
+  interests = [],
+  travelPace = "Balanced",
+  mustVisit = "",
+}) => {
+  const start = new Date(`${startDate}T12:00:00`);
+
+  const end = new Date(`${endDate}T12:00:00`);
+
+  const dayMs = 1000 * 60 * 60 * 24;
+
+  let numberOfDays = Math.floor((end.getTime() - start.getTime()) / dayMs) + 1;
+
+  if (!Number.isFinite(numberOfDays) || numberOfDays < 1) {
+    numberOfDays = 1;
+  }
+
+  numberOfDays = Math.min(numberOfDays, 10);
+
+  const totalBudget = Number(budget) || 10000;
+
+  const dailyBudget = Math.max(
+    500,
+
+    Math.floor(totalBudget / numberOfDays),
+  );
+
+  const preferredCategory = interests[0] || "Sightseeing";
+
+  const templates = [
+    {
+      time: "09:00 AM",
+
+      name: `${destination} Local Highlights`,
+
+      location: hotel || destination,
+
+      costRatio: 0.12,
+
+      category: preferredCategory,
+
+      durationMinutes: 120,
+
+      travelMinutesFromPrevious: 0,
+    },
+
+    {
+      time: "12:00 PM",
+
+      name: "Local Food Experience",
+
+      location: destination,
+
+      costRatio: 0.1,
+
+      category: "Food",
+
+      durationMinutes: 90,
+
+      travelMinutesFromPrevious: 30,
+    },
+
+    {
+      time: "03:00 PM",
+
+      name: mustVisit || `${destination} Cultural Experience`,
+
+      location: destination,
+
+      costRatio: 0.12,
+
+      category: "Culture",
+
+      durationMinutes: 120,
+
+      travelMinutesFromPrevious: 30,
+    },
+
+    {
+      time: "06:30 PM",
+
+      name: `${destination} Evening Experience`,
+
+      location: destination,
+
+      costRatio: 0.08,
+
+      category: preferredCategory,
+
+      durationMinutes: 120,
+
+      travelMinutesFromPrevious: 30,
+    },
+  ];
+
+  let activitiesPerDay = 3;
+
+  if (travelPace === "Relaxed") {
+    activitiesPerDay = 2;
+  }
+
+  if (travelPace === "Packed") {
+    activitiesPerDay = 4;
+  }
+
+  const days = Array.from(
+    {
+      length: numberOfDays,
+    },
+
+    (_, dayIndex) => ({
+      day: dayIndex + 1,
+
+      title: `Explore ${destination} — Day ${dayIndex + 1}`,
+
+      activities: templates
+        .slice(0, activitiesPerDay)
+        .map((activity, index) => ({
+          time: activity.time,
+
+          name:
+            dayIndex === 0
+              ? activity.name
+              : `${activity.name} — Day ${dayIndex + 1}`,
+
+          location: activity.location,
+
+          cost: Math.round(dailyBudget * activity.costRatio),
+
+          category: activity.category,
+
+          durationMinutes: activity.durationMinutes,
+
+          travelMinutesFromPrevious:
+            index === 0 ? 0 : activity.travelMinutesFromPrevious,
+        })),
+    }),
+  );
+
+  return {
+    days,
+
+    fallback: true,
+
+    fallbackReason: "Gemini quota is temporarily unavailable.",
+  };
+};
+
+// =====================================
+// HEALTH CHECK
 // =====================================
 
 app.get("/", (req, res) => {
   res.json({
     success: true,
+
     message: "TravelPilot backend is running",
+
+    integrations: getIntegrationStatus(),
   });
 });
 
@@ -276,8 +302,10 @@ app.get("/", (req, res) => {
 // GENERATE TRIP
 // =====================================
 
-app.post("/api/generate-trip", async (req, res) => {
-  try {
+app.post(
+  "/api/generate-trip",
+
+  async (req, res) => {
     const missingFields = validateRequiredFields(req.body, [
       "destination",
       "startDate",
@@ -290,27 +318,27 @@ app.post("/api/generate-trip", async (req, res) => {
         res,
         400,
         "MISSING_TRIP_DATA",
+
         `Missing required fields: ${missingFields.join(", ")}`,
       );
     }
 
-    const {
-      destination,
-      startDate,
-      endDate,
-      budget,
-      hotel,
-      interests,
-      travelPace,
-      mustVisit,
-    } = req.body;
+    let baseResult;
 
-    const prompt = `
+    try {
+      const {
+        destination,
+        startDate,
+        endDate,
+        budget,
+        hotel,
+        interests,
+        travelPace,
+        mustVisit,
+      } = req.body;
+
+      const prompt = `
 You are the itinerary planning engine for TravelPilot.
-
-Create a realistic travel itinerary.
-
-Trip details:
 
 Destination:
 ${destination}
@@ -333,31 +361,27 @@ ${interests?.join(", ") || "General"}
 Travel pace:
 ${travelPace || "Balanced"}
 
-Must visit places:
+Must visit:
 ${mustVisit || "None"}
+
+Create a realistic itinerary.
 
 Rules:
 
-- Recommend destination-specific real places.
-- Respect the user's interests.
-- Include must-visit places when realistically possible.
-- Relaxed pace = fewer activities and more free time.
-- Balanced pace = moderate schedule.
-- Packed pace = more activities.
-- Keep the itinerary realistic for the budget.
-- Give realistic activity start times.
-- Group nearby activities together where possible.
-- Include estimated INR cost for every activity.
-- Include durationMinutes for every activity.
-- Include travelMinutesFromPrevious for every activity.
-- travelMinutesFromPrevious is estimated travel time from the previous activity.
-- For the first activity of each day, travelMinutesFromPrevious must be 0.
-- Avoid scheduling conflicts when possible.
-- Do not claim reservations already exist.
-- Return ONLY valid JSON.
+- Recommend real destination-specific places.
+- Respect user interests.
+- Keep within budget.
+- Include realistic times.
+- Group nearby activities.
+- Include estimated INR cost.
+- Include durationMinutes.
+- Include travelMinutesFromPrevious.
+- First activity each day must have travelMinutesFromPrevious = 0.
+- Do not claim bookings exist.
+- Return only valid JSON.
 - No markdown.
 
-Return exactly:
+Return:
 
 {
   "days": [
@@ -367,9 +391,9 @@ Return exactly:
       "activities": [
         {
           "time": "09:00 AM",
-          "name": "Activity name",
+          "name": "Activity",
           "location": "Location",
-          "cost": 1000,
+          "cost": 500,
           "category": "Culture",
           "durationMinutes": 90,
           "travelMinutesFromPrevious": 0
@@ -380,75 +404,163 @@ Return exactly:
 }
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
 
-    const itinerary = parseGeminiJson(response.text);
+        contents: prompt,
+      });
 
-    if (!Array.isArray(itinerary.days)) {
-      throw new Error("INVALID_GEMINI_JSON");
-    }
+      const result = parseGeminiJson(response.text);
 
-    return res.json({
-      ...itinerary,
-      fallback: false,
-    });
-  } catch (error) {
-    console.error("Generate trip error:", error);
+      if (!Array.isArray(result.days)) {
+        throw new Error("INVALID_GEMINI_JSON");
+      }
 
-    if (isRateLimitError(error)) {
-      console.log("Gemini quota reached. Using fallback itinerary.");
+      baseResult = {
+        days: result.days,
 
-      const fallbackTrip = createFallbackTrip(req.body);
+        fallback: false,
 
-      return res.status(200).json({
-        ...fallbackTrip,
+        message: "",
+      };
+    } catch (error) {
+      console.error("Trip generation AI error:", error);
+
+      if (!isRateLimitError(error)) {
+        return handleGeminiError(error, res);
+      }
+
+      baseResult = {
+        ...createFallbackTrip(req.body),
 
         message:
-          "Gemini quota is temporarily unavailable, so TravelPilot switched to demo fallback mode.",
+          "Gemini quota is temporarily unavailable, so TravelPilot switched to fallback mode.",
+      };
+    }
+
+    // =================================
+    // LIVE DATA ENRICHMENT
+    // =================================
+
+    try {
+      let days = await enrichItinerary(baseResult.days, req.body);
+
+      // Find coordinates for weather
+
+      let locationActivity = days
+        .flatMap((day) => day.activities || [])
+        .find((activity) => activity.coordinates);
+
+      if (!locationActivity) {
+        const destinationPlace = await googlePlacesSearch(req.body.destination);
+
+        if (destinationPlace?.location) {
+          locationActivity = {
+            coordinates: destinationPlace.location,
+          };
+        }
+      }
+
+      // Weather
+
+      if (locationActivity?.coordinates) {
+        const weather = await getWeatherForecast(
+          locationActivity.coordinates.latitude,
+
+          locationActivity.coordinates.longitude,
+        );
+
+        days = attachWeatherToDays(days, weather);
+
+        days = flagWeatherDisruptions(days);
+      } else {
+        days = days.map((day) => ({
+          ...day,
+
+          weather: {
+            unavailable: true,
+
+            summary: "Weather unavailable",
+
+            risk: "unknown",
+          },
+        }));
+      }
+
+      const realWorldStatus = getIntegrationStatus();
+
+      // Save to Supabase
+
+      const savedTrip = await saveTripToSupabase({
+        body: req.body,
+
+        days,
+
+        fallback: baseResult.fallback,
+
+        realWorldStatus,
+      });
+
+      return res.json({
+        ...baseResult,
+
+        days,
+
+        tripId: savedTrip?.id || null,
+
+        transportation: buildTransportation(req.body),
+
+        accommodation: buildAccommodation(req.body),
+
+        realWorldStatus,
+      });
+    } catch (error) {
+      console.error("Live enrichment error:", error);
+
+      return res.json({
+        ...baseResult,
+
+        transportation: buildTransportation(req.body),
+
+        accommodation: buildAccommodation(req.body),
+
+        realWorldStatus: getIntegrationStatus(),
+
+        enrichmentWarning: "Some live travel-data services were unavailable.",
       });
     }
-
-    return handleGeminiError(error, res);
-  }
-});
+  },
+);
 
 // =====================================
-// REPLAN ACTIVITY
+// REPLACE ACTIVITY
 // =====================================
 
-app.post("/api/replan", async (req, res) => {
-  try {
-    const missingFields = validateRequiredFields(req.body, [
-      "destination",
-      "cancelledActivity",
-      "currentDayActivities",
-    ]);
+app.post(
+  "/api/replan",
 
-    if (missingFields.length > 0) {
-      return sendError(
-        res,
-        400,
-        "MISSING_REPLAN_DATA",
-        `Missing required fields: ${missingFields.join(", ")}`,
-      );
-    }
+  async (req, res) => {
+    try {
+      const {
+        destination,
+        interests,
+        travelPace,
+        budget,
+        cancelledActivity,
+        currentDayActivities,
+      } = req.body;
 
-    const {
-      destination,
-      interests,
-      travelPace,
-      budget,
-      cancelledActivity,
-      currentDayActivities,
-    } = req.body;
+      if (!destination || !cancelledActivity) {
+        return sendError(
+          res,
+          400,
+          "MISSING_REPLAN_DATA",
+          "Destination and cancelled activity are required.",
+        );
+      }
 
-    const prompt = `
-You are TravelPilot's itinerary replanning agent.
-
-One activity is unavailable.
+      const prompt = `
+You are TravelPilot's replanning agent.
 
 Destination:
 ${destination}
@@ -462,427 +574,500 @@ ${travelPace || "Balanced"}
 Budget:
 ₹${budget || "Not specified"}
 
-Cancelled activity:
-
+Cancelled:
 ${JSON.stringify(cancelledActivity, null, 2)}
 
-Activities already planned:
-
-${JSON.stringify(currentDayActivities, null, 2)}
+Existing activities:
+${JSON.stringify(currentDayActivities || [], null, 2)}
 
 Find ONE realistic replacement.
 
-Rules:
-
-- Prefer the same general geographic area.
-- Keep a similar time slot.
-- Match user interests.
-- Avoid duplicate activities.
-- Keep cost reasonable.
-- Recommend a real place where possible.
-- Include durationMinutes.
-- Include travelMinutesFromPrevious.
-- Ensure the replacement fits with surrounding activities.
-- Return only valid JSON.
-- No markdown.
-
-Return exactly:
+Return only JSON:
 
 {
   "replacement": {
     "time": "02:00 PM",
-    "name": "Replacement activity",
+    "name": "Replacement",
     "location": "Location",
-    "cost": 1000,
+    "cost": 500,
     "category": "Culture",
     "durationMinutes": 90,
     "travelMinutesFromPrevious": 20,
-    "reason": "Explain why this replacement fits."
+    "reason": "Why it fits"
   }
 }
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
 
-    const result = parseGeminiJson(response.text);
-
-    if (!result.replacement) {
-      throw new Error("INVALID_GEMINI_JSON");
-    }
-
-    return res.json({
-      ...result,
-      fallback: false,
-    });
-  } catch (error) {
-    console.error("Replan error:", error);
-
-    if (isRateLimitError(error)) {
-      const {
-        cancelledActivity,
-        currentDayActivities = [],
-        interests = [],
-        destination,
-      } = req.body;
-
-      const replacement = {
-        time: cancelledActivity?.time || "02:00 PM",
-
-        name: cancelledActivity?.category
-          ? `Alternative ${cancelledActivity.category} Experience`
-          : "Alternative Local Experience",
-
-        location:
-          cancelledActivity?.location ||
-          currentDayActivities[0]?.location ||
-          destination,
-
-        cost: Math.max(
-          0,
-          Math.round(Number(cancelledActivity?.cost || 500) * 0.8),
-        ),
-
-        category: cancelledActivity?.category || interests[0] || "Sightseeing",
-
-        durationMinutes: Number(cancelledActivity?.durationMinutes) || 90,
-
-        travelMinutesFromPrevious:
-          Number(cancelledActivity?.travelMinutesFromPrevious) || 20,
-
-        reason:
-          "TravelPilot selected a fallback alternative because the AI service quota is temporarily unavailable.",
-      };
-
-      return res.status(200).json({
-        replacement,
-        fallback: true,
-        fallbackReason: "Gemini quota temporarily unavailable",
+        contents: prompt,
       });
-    }
 
-    return handleGeminiError(error, res);
-  }
-});
+      const result = parseGeminiJson(response.text);
+
+      let replacement = result.replacement;
+
+      if (!replacement) {
+        throw new Error("INVALID_GEMINI_JSON");
+      }
+
+      const place = await googlePlacesSearch(
+        `${replacement.name}, ${replacement.location}, ${destination}`,
+      );
+
+      if (place) {
+        replacement = {
+          ...replacement,
+
+          name: place.displayName?.text || replacement.name,
+
+          formattedAddress: place.formattedAddress,
+
+          coordinates: place.location,
+
+          mapUrl: place.googleMapsUri,
+
+          rating: place.rating ?? null,
+
+          realPlaceVerified: true,
+        };
+      }
+
+      return res.json({
+        replacement,
+
+        fallback: false,
+      });
+    } catch (error) {
+      console.error("Replan error:", error);
+
+      if (isRateLimitError(error)) {
+        const { cancelledActivity, interests = [], destination } = req.body;
+
+        let replacement = {
+          time: cancelledActivity?.time || "02:00 PM",
+
+          name: `Alternative ${
+            cancelledActivity?.category || "Local"
+          } Experience`,
+
+          location: cancelledActivity?.location || destination,
+
+          cost: Math.round(Number(cancelledActivity?.cost || 500) * 0.8),
+
+          category:
+            cancelledActivity?.category || interests[0] || "Sightseeing",
+
+          durationMinutes: Number(cancelledActivity?.durationMinutes) || 90,
+
+          travelMinutesFromPrevious:
+            Number(cancelledActivity?.travelMinutesFromPrevious) || 20,
+
+          reason:
+            "Fallback replacement used because Gemini quota is unavailable.",
+        };
+
+        const place = await googlePlacesSearch(
+          `${replacement.category} attraction near ${replacement.location}, ${destination}`,
+        );
+
+        if (place) {
+          replacement = {
+            ...replacement,
+
+            name: place.displayName?.text || replacement.name,
+
+            formattedAddress: place.formattedAddress,
+
+            coordinates: place.location,
+
+            mapUrl: place.googleMapsUri,
+
+            rating: place.rating,
+
+            realPlaceVerified: true,
+          };
+        }
+
+        return res.json({
+          replacement,
+
+          fallback: true,
+        });
+      }
+
+      return handleGeminiError(error, res);
+    }
+  },
+);
 
 // =====================================
 // FIX CONFLICT
 // =====================================
 
-app.post("/api/fix-conflict", async (req, res) => {
-  try {
-    const missingFields = validateRequiredFields(req.body, [
-      "destination",
-      "dayNumber",
-      "currentDayActivities",
-    ]);
+app.post(
+  "/api/fix-conflict",
 
-    if (missingFields.length > 0) {
-      return sendError(
-        res,
-        400,
-        "MISSING_CONFLICT_DATA",
-        `Missing required fields: ${missingFields.join(", ")}`,
-      );
-    }
+  async (req, res) => {
+    try {
+      const { destination, dayNumber, currentDayActivities } = req.body;
 
-    const {
-      destination,
-      budget,
-      interests,
-      travelPace,
-      dayNumber,
-      conflictingActivities,
-      currentDayActivities,
-    } = req.body;
-
-    const prompt = `
-You are TravelPilot's schedule conflict resolution agent.
-
-A scheduling conflict has been detected.
+      const prompt = `
+You are TravelPilot's schedule optimization agent.
 
 Destination:
 ${destination}
 
-Budget:
-₹${budget || "Not specified"}
-
-Interests:
-${interests?.join(", ") || "General"}
-
-Travel pace:
-${travelPace || "Balanced"}
-
 Day:
 ${dayNumber}
 
-Conflicting activities:
-
-${JSON.stringify(conflictingActivities || [], null, 2)}
-
-Full activities for this day:
+Activities:
 
 ${JSON.stringify(currentDayActivities, null, 2)}
 
-Fix the conflict while changing as little as possible.
+Remove schedule conflicts.
 
-You may:
-- Move an activity later.
-- Move an activity earlier.
-- Shorten an activity if realistic.
-- Replace an activity if necessary.
-- Reorder nearby activities.
+Respect:
+- activity duration
+- real travel time
+- realistic opening times
 
-Rules:
-
-- Respect activity duration.
-- Respect travel time.
-- Do not create new schedule conflicts.
-- Avoid removing activities unless necessary.
-- Keep costs reasonable.
-- Include durationMinutes for every activity.
-- Include travelMinutesFromPrevious for every activity.
-- First activity travelMinutesFromPrevious must be 0.
-- Return ONLY valid JSON.
-- No markdown.
-
-Return exactly:
+Return JSON only:
 
 {
-  "updatedActivities": [
-    {
-      "time": "09:00 AM",
-      "name": "Activity name",
-      "location": "Location",
-      "cost": 500,
-      "category": "Culture",
-      "durationMinutes": 90,
-      "travelMinutesFromPrevious": 0
-    }
-  ],
-  "reason": "Short explanation of how the conflict was fixed."
+  "updatedActivities": [],
+  "reason": "Explanation"
 }
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
 
-    const result = parseGeminiJson(response.text);
+        contents: prompt,
+      });
 
-    if (!Array.isArray(result.updatedActivities)) {
-      throw new Error("INVALID_GEMINI_JSON");
+      const result = parseGeminiJson(response.text);
+
+      return res.json(result);
+    } catch (error) {
+      return handleGeminiError(error, res);
     }
+  },
+);
 
-    return res.json(result);
-  } catch (error) {
-    return handleGeminiError(error, res);
-  }
-});
+// =====================================
+// WEATHER ADAPTATION
+// =====================================
+
+app.post(
+  "/api/adapt-weather",
+
+  async (req, res) => {
+    try {
+      const { destination, itinerary } = req.body;
+
+      if (!destination || !Array.isArray(itinerary)) {
+        return sendError(
+          res,
+          400,
+          "INVALID_WEATHER_REQUEST",
+          "Destination and itinerary are required.",
+        );
+      }
+
+      const days = await adaptTripForWeather(itinerary, destination);
+
+      return res.json({
+        days,
+
+        message:
+          "TravelPilot replaced weather-sensitive activities with safer alternatives where possible.",
+      });
+    } catch (error) {
+      console.error(error);
+
+      return sendError(
+        res,
+        500,
+        "WEATHER_ADAPTATION_FAILED",
+        "Could not adapt the itinerary for weather.",
+      );
+    }
+  },
+);
 
 // =====================================
 // CHAT
 // =====================================
 
-app.post("/api/chat", async (req, res) => {
-  try {
-    const missingFields = validateRequiredFields(req.body, [
-      "message",
-      "destination",
-      "itinerary",
-    ]);
+app.post(
+  "/api/chat",
 
-    if (missingFields.length > 0) {
-      return sendError(
-        res,
-        400,
-        "MISSING_CHAT_DATA",
-        `Missing required fields: ${missingFields.join(", ")}`,
-      );
-    }
+  async (req, res) => {
+    try {
+      const {
+        message,
+        destination,
+        hotel,
+        budget,
+        interests,
+        travelPace,
+        itinerary,
+      } = req.body;
 
-    const {
-      message,
-      destination,
-      hotel,
-      budget,
-      interests,
-      travelPace,
-      itinerary,
-    } = req.body;
-
-    const prompt = `
-You are TravelPilot's intelligent trip assistant.
+      const prompt = `
+You are TravelPilot's trip assistant.
 
 Destination:
 ${destination}
 
-Hotel / Area:
-${hotel || "Not specified"}
+Hotel:
+${hotel}
 
 Budget:
-₹${budget || "Not specified"}
-
-Interests:
-${interests?.join(", ") || "General"}
-
-Travel pace:
-${travelPace || "Balanced"}
-
-Current itinerary:
-
-${JSON.stringify(itinerary, null, 2)}
-
-User question:
-
-${message}
-
-Rules:
-
-- Use the actual itinerary when answering.
-- Consider activity duration.
-- Consider travel time.
-- Consider budget.
-- Consider hotel location.
-- Do not claim live availability unless provided.
-- If something cannot be verified, say so clearly.
-- Do not use markdown formatting.
-- Use short readable paragraphs.
-`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
-
-    if (!response.text) {
-      throw new Error("INVALID_GEMINI_RESPONSE");
-    }
-
-    return res.json({
-      answer: response.text.trim(),
-    });
-  } catch (error) {
-    if (error?.message === "INVALID_GEMINI_RESPONSE") {
-      return sendError(
-        res,
-        502,
-        "INVALID_AI_RESPONSE",
-        "TravelPilot received an empty response from the AI service.",
-      );
-    }
-
-    return handleGeminiError(error, res);
-  }
-});
-
-// =====================================
-// BUDGET OPTIMIZATION
-// =====================================
-
-app.post("/api/optimize-budget", async (req, res) => {
-  try {
-    const missingFields = validateRequiredFields(req.body, [
-      "destination",
-      "budget",
-      "itinerary",
-    ]);
-
-    if (missingFields.length > 0) {
-      return sendError(
-        res,
-        400,
-        "MISSING_BUDGET_DATA",
-        `Missing required fields: ${missingFields.join(", ")}`,
-      );
-    }
-
-    const { destination, budget, interests, travelPace, itinerary } = req.body;
-
-    const prompt = `
-You are TravelPilot's budget optimization agent.
-
-Destination:
-${destination}
-
-Maximum activity budget:
 ₹${budget}
 
 Interests:
 ${interests?.join(", ") || "General"}
 
 Travel pace:
-${travelPace || "Balanced"}
+${travelPace}
+
+Itinerary:
+
+${JSON.stringify(itinerary, null, 2)}
+
+Question:
+
+${message}
+
+Use:
+- verified places
+- opening hours
+- actual travel time
+- weather information
+- budget
+
+Be concise.
+
+Do not use markdown.
+`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+
+        contents: prompt,
+      });
+
+      return res.json({
+        answer: response.text.trim(),
+      });
+    } catch (error) {
+      if (isRateLimitError(error)) {
+        return res.json({
+          answer:
+            "The AI assistant is temporarily unavailable because Gemini quota is exhausted. Your verified places, weather, travel times and saved trip remain available.",
+
+          fallback: true,
+        });
+      }
+
+      return handleGeminiError(error, res);
+    }
+  },
+);
+
+// =====================================
+// BUDGET OPTIMIZATION
+// =====================================
+
+app.post(
+  "/api/optimize-budget",
+
+  async (req, res) => {
+    try {
+      const { destination, budget, itinerary, interests, travelPace } =
+        req.body;
+
+      const prompt = `
+Optimize this itinerary to fit within ₹${budget}.
+
+Destination:
+${destination}
+
+Interests:
+${interests?.join(", ") || "General"}
+
+Travel pace:
+${travelPace}
 
 Current itinerary:
 
 ${JSON.stringify(itinerary, null, 2)}
 
-Modify the itinerary so activity costs fit within the user's budget.
+Preserve:
+- verified real places
+- travel time
+- opening hour data
+where possible.
 
-Rules:
-
-- Preserve important attractions where possible.
-- Replace expensive activities with cheaper alternatives.
-- Prefer free or low-cost attractions where suitable.
-- Respect user interests.
-- Do not duplicate activities.
-- Keep schedule realistic.
-- Include durationMinutes for every activity.
-- Include travelMinutesFromPrevious for every activity.
-- First activity of each day must have travelMinutesFromPrevious = 0.
-- Avoid creating schedule conflicts.
-- Return valid JSON only.
-- No markdown.
-
-Return exactly:
+Return JSON only:
 
 {
-  "days": [
-    {
-      "day": 1,
-      "title": "Day title",
-      "activities": [
-        {
-          "time": "09:00 AM",
-          "name": "Activity name",
-          "location": "Location",
-          "cost": 500,
-          "category": "Culture",
-          "durationMinutes": 90,
-          "travelMinutesFromPrevious": 0
-        }
-      ]
-    }
-  ],
+  "days": [],
   "summary": {
-    "changes": "Short explanation of how the itinerary was made cheaper."
+    "changes": "Explanation"
   }
 }
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
 
-    const result = parseGeminiJson(response.text);
+        contents: prompt,
+      });
 
-    if (!Array.isArray(result.days)) {
-      throw new Error("INVALID_GEMINI_JSON");
+      const result = parseGeminiJson(response.text);
+
+      return res.json(result);
+    } catch (error) {
+      if (isRateLimitError(error)) {
+        const budget = Number(req.body.budget || 0);
+
+        const itinerary = req.body.itinerary || [];
+
+        const currentTotal = itinerary.reduce(
+          (tripTotal, day) =>
+            tripTotal +
+            (day.activities || []).reduce(
+              (dayTotal, activity) => dayTotal + Number(activity.cost || 0),
+
+              0,
+            ),
+
+          0,
+        );
+
+        const ratio =
+          currentTotal > 0 && budget > 0
+            ? Math.min(1, budget / currentTotal)
+            : 1;
+
+        const days = itinerary.map((day) => ({
+          ...day,
+
+          activities: (day.activities || []).map((activity) => ({
+            ...activity,
+
+            cost: Math.round(Number(activity.cost || 0) * ratio),
+          })),
+        }));
+
+        return res.json({
+          days,
+
+          fallback: true,
+
+          summary: {
+            changes:
+              "TravelPilot adjusted the estimated activity costs while Gemini quota is unavailable.",
+          },
+        });
+      }
+
+      return handleGeminiError(error, res);
     }
-
-    return res.json(result);
-  } catch (error) {
-    return handleGeminiError(error, res);
-  }
-});
+  },
+);
 
 // =====================================
-// INVALID JSON HANDLER
+// TRIP HISTORY
+// =====================================
+
+app.get(
+  "/api/trips",
+
+  async (req, res) => {
+    if (!supabaseConfigured()) {
+      return res.json({
+        trips: [],
+
+        configured: false,
+
+        message: "Supabase is not configured yet.",
+      });
+    }
+
+    try {
+      const trips = await getTripHistory();
+
+      return res.json({
+        trips,
+
+        configured: true,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return sendError(
+        res,
+        500,
+        "TRIP_HISTORY_FAILED",
+        "Could not load trip history.",
+      );
+    }
+  },
+);
+
+// =====================================
+// UPDATE TRANSPORT / ACCOMMODATION
+// =====================================
+
+app.patch(
+  "/api/trips/:id/logistics",
+
+  async (req, res) => {
+    if (!supabaseConfigured()) {
+      return sendError(
+        res,
+        503,
+        "DATABASE_NOT_CONFIGURED",
+        "Supabase is not configured.",
+      );
+    }
+
+    try {
+      const update = {};
+
+      if (req.body.transportation) {
+        update.transportation = req.body.transportation;
+      }
+
+      if (req.body.accommodation) {
+        update.accommodation = req.body.accommodation;
+      }
+
+      const trip = await updateTripLogistics(req.params.id, update);
+
+      return res.json({
+        trip,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return sendError(
+        res,
+        500,
+        "LOGISTICS_UPDATE_FAILED",
+        "Could not update trip logistics.",
+      );
+    }
+  },
+);
+
+// =====================================
+// INVALID JSON
 // =====================================
 
 app.use((err, req, res, next) => {
@@ -891,7 +1076,7 @@ app.use((err, req, res, next) => {
       res,
       400,
       "INVALID_JSON",
-      "The request body contains invalid JSON.",
+      "Request contains invalid JSON.",
     );
   }
 
@@ -899,38 +1084,37 @@ app.use((err, req, res, next) => {
 });
 
 // =====================================
-// 404 HANDLER
+// 404
 // =====================================
 
-app.use((req, res) => {
-  return sendError(
-    res,
-    404,
-    "ROUTE_NOT_FOUND",
-    "The requested TravelPilot API route does not exist.",
-  );
-});
+app.use((req, res) =>
+  sendError(res, 404, "ROUTE_NOT_FOUND", "TravelPilot API route not found."),
+);
 
 // =====================================
-// FINAL ERROR HANDLER
+// FINAL ERROR
 // =====================================
 
 app.use((err, req, res, next) => {
-  console.error("Unhandled server error:", err);
+  console.error("Unhandled error:", err);
 
   return sendError(
     res,
     500,
     "INTERNAL_SERVER_ERROR",
-    "An unexpected server error occurred.",
+    "Unexpected TravelPilot server error.",
   );
 });
 
 // =====================================
-// EXPORT / LOCAL SERVER
+// EXPORT
 // =====================================
 
 export default app;
+
+// =====================================
+// LOCAL DEVELOPMENT
+// =====================================
 
 if (process.env.NODE_ENV !== "production") {
   const PORT = process.env.PORT || 5001;
