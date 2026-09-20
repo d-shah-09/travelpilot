@@ -1,0 +1,172 @@
+.tp2-image-stream {
+  position: absolute;
+  inset: 0;
+
+  overflow: hidden;
+
+  perspective: 1000px;
+
+  pointer-events: none;
+
+  container-type: inline-size;
+}
+
+.tp2-stream-vanishing-glow {
+  position: absolute;
+
+  left: 50%;
+  top: var(--stream-axis);
+
+  width: 420px;
+  height: 240px;
+
+  transform: translate(-50%, -50%);
+
+  border-radius: 50%;
+
+  background: radial-gradient(
+    ellipse,
+    rgba(34, 211, 238, 0.17),
+    rgba(139, 92, 246, 0.08) 45%,
+    transparent 72%
+  );
+
+  filter: blur(35px);
+}
+
+/* ============================
+   STREAM CARDS
+   ============================ */
+
+.tp2-stream-rail img {
+  position: absolute;
+
+  left: 50%;
+  top: var(--stream-axis);
+
+  width: clamp(105px, 11vw, 185px);
+
+  aspect-ratio: 3 / 4;
+
+  object-fit: cover;
+
+  border-radius: 14px;
+
+  border: 1px solid rgba(255, 255, 255, 0.14);
+
+  box-shadow:
+    0 22px 55px rgba(0, 0, 0, 0.38),
+    0 0 30px rgba(34, 211, 238, 0.07);
+
+  opacity: 0;
+
+  will-change: transform, opacity;
+}
+
+/* LEFT STREAM */
+
+.tp2-stream-left img {
+  animation-name: tp2StreamLeft;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/* RIGHT STREAM */
+
+.tp2-stream-right img {
+  animation-name: tp2StreamRight;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/* ============================
+   LEFT ANIMATION
+   ============================ */
+
+@keyframes tp2StreamLeft {
+  0% {
+    opacity: 0;
+
+    transform: translate(-50%, -50%) translate3d(-2vw, 0, -650px) scale(0.15)
+      rotateY(5deg) rotateZ(0deg);
+  }
+
+  8% {
+    opacity: 0.9;
+  }
+
+  25% {
+    transform: translate(-50%, -50%) translate3d(-8vw, -1vh, -420px) scale(0.3)
+      rotateY(9deg) rotateZ(-1deg);
+  }
+
+  50% {
+    transform: translate(-50%, -50%) translate3d(-20vw, -3vh, -220px)
+      scale(0.58) rotateY(15deg) rotateZ(-2deg);
+  }
+
+  75% {
+    transform: translate(-50%, -50%) translate3d(-36vw, -6vh, -70px) scale(0.94)
+      rotateY(22deg) rotateZ(-4deg);
+  }
+
+  93% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+
+    transform: translate(-50%, -50%) translate3d(-57vw, -11vh, 120px) scale(1.5)
+      rotateY(32deg) rotateZ(-7deg);
+  }
+}
+
+/* ============================
+   RIGHT ANIMATION
+   ============================ */
+
+@keyframes tp2StreamRight {
+  0% {
+    opacity: 0;
+
+    transform: translate(-50%, -50%) translate3d(2vw, 0, -650px) scale(0.15)
+      rotateY(-5deg) rotateZ(0deg);
+  }
+
+  8% {
+    opacity: 0.9;
+  }
+
+  25% {
+    transform: translate(-50%, -50%) translate3d(8vw, 1vh, -420px) scale(0.3)
+      rotateY(-9deg) rotateZ(1deg);
+  }
+
+  50% {
+    transform: translate(-50%, -50%) translate3d(20vw, 3vh, -220px) scale(0.58)
+      rotateY(-15deg) rotateZ(2deg);
+  }
+
+  75% {
+    transform: translate(-50%, -50%) translate3d(36vw, 6vh, -70px) scale(0.94)
+      rotateY(-22deg) rotateZ(4deg);
+  }
+
+  93% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+
+    transform: translate(-50%, -50%) translate3d(57vw, 11vh, 120px) scale(1.5)
+      rotateY(-32deg) rotateZ(7deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tp2-stream-rail img {
+    animation-play-state: paused;
+  }
+}

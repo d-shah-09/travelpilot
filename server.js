@@ -8,6 +8,8 @@ dotenv.config();
 
 import {
   googlePlacesSearch,
+  googleAutocompleteSuggestions,
+  getGooglePlacePhoto,
   enrichItinerary,
   getWeatherForecast,
   attachWeatherToDays,
@@ -49,6 +51,14 @@ app.use(
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
+
+// =====================================
+// PHOTO CACHE
+// =====================================
+
+const placePhotoCache = new Map();
+
+const PLACE_PHOTO_CACHE_TTL = 1000 * 60 * 10;
 
 // =====================================
 // HELPERS
@@ -128,6 +138,84 @@ const handleGeminiError = (error, res) => {
 };
 
 // =====================================
+// PRESERVE PLACE METADATA
+// =====================================
+
+const normalizeActivityName = (value) =>
+  String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+const preserveActivityMetadata = (
+  newActivities = [],
+  previousActivities = [],
+) =>
+  newActivities.map((activity, index) => {
+    const normalizedName = normalizeActivityName(activity?.name);
+
+    const nameMatch = previousActivities.find(
+      (previous) => normalizeActivityName(previous?.name) === normalizedName,
+    );
+
+    const previous = nameMatch || previousActivities[index] || {};
+
+    return {
+      ...previous,
+      ...activity,
+
+      placeId: activity?.placeId || previous?.placeId || null,
+
+      hasPlacePhoto:
+        activity?.hasPlacePhoto ?? previous?.hasPlacePhoto ?? false,
+
+      realPlaceVerified:
+        activity?.realPlaceVerified ?? previous?.realPlaceVerified ?? false,
+
+      formattedAddress:
+        activity?.formattedAddress || previous?.formattedAddress || "",
+
+      coordinates: activity?.coordinates || previous?.coordinates || null,
+
+      mapUrl: activity?.mapUrl || previous?.mapUrl || null,
+
+      websiteUrl: activity?.websiteUrl || previous?.websiteUrl || null,
+
+      rating: activity?.rating ?? previous?.rating ?? null,
+
+      openingHoursStatus:
+        activity?.openingHoursStatus ||
+        previous?.openingHoursStatus ||
+        "unknown",
+
+      openingHoursLabel:
+        activity?.openingHoursLabel ||
+        previous?.openingHoursLabel ||
+        "Not verified",
+    };
+  });
+
+const preserveItineraryMetadata = (newDays = [], previousDays = []) =>
+  newDays.map((day, dayIndex) => {
+    const previousDay =
+      previousDays.find(
+        (previous) => Number(previous?.day) === Number(day?.day),
+      ) ||
+      previousDays[dayIndex] ||
+      {};
+
+    return {
+      ...previousDay,
+      ...day,
+
+      activities: preserveActivityMetadata(
+        day?.activities || [],
+
+        previousDay?.activities || [],
+      ),
+    };
+  });
+
+// =====================================
 // FALLBACK TRIP
 // =====================================
 
@@ -157,11 +245,7 @@ const createFallbackTrip = ({
 
   const totalBudget = Number(budget) || 10000;
 
-  const dailyBudget = Math.max(
-    500,
-
-    Math.floor(totalBudget / numberOfDays),
-  );
+  const dailyBudget = Math.max(500, Math.floor(totalBudget / numberOfDays));
 
   const preferredCategory = interests[0] || "Sightseeing";
 
@@ -277,7 +361,6 @@ const createFallbackTrip = ({
 
   return {
     days,
-
     fallback: true,
 
     fallbackReason: "Gemini quota is temporarily unavailable.",
@@ -285,7 +368,7 @@ const createFallbackTrip = ({
 };
 
 // =====================================
-// HEALTH CHECK
+// HEALTH
 // =====================================
 
 app.get("/", (req, res) => {
@@ -294,9 +377,225 @@ app.get("/", (req, res) => {
 
     message: "TravelPilot backend is running",
 
+    apiVersion: "2026-09-20-autocomplete-photo-fallback",
+
     integrations: getIntegrationStatus(),
   });
 });
+
+// =====================================
+// AUTOCOMPLETE
+// =====================================
+
+app.get(
+  "/api/place-suggestions",
+
+  async (req, res) => {
+    const input = String(req.query.q || "").trim();
+
+    const mode = String(req.query.mode || "destination").trim();
+
+    const destination = String(req.query.destination || "").trim();
+
+    if (!input) {
+      return res.json({
+        success: true,
+        suggestions: [],
+      });
+    }
+
+    if (!["destination", "area", "mustVisit"].includes(mode)) {
+      return sendError(
+        res,
+        400,
+        "INVALID_SUGGESTION_MODE",
+        "Suggestion mode must be destination, area, or mustVisit.",
+      );
+    }
+
+    try {
+      const suggestions = await googleAutocompleteSuggestions({
+        input,
+        mode,
+        destination,
+      });
+
+      return res.json({
+        success: true,
+        suggestions,
+      });
+    } catch (error) {
+      console.error("Place suggestion endpoint failed:", error);
+
+      return sendError(
+        res,
+        500,
+        "PLACE_SUGGESTIONS_FAILED",
+        error?.message || "Could not load place suggestions.",
+      );
+    }
+  },
+);
+// =====================================
+// PLACE PHOTO
+// Google first + Wikimedia fallback
+// =====================================
+
+app.get(
+  "/api/place-photo",
+
+  async (req, res) => {
+    const placeId = String(req.query.placeId || "").trim();
+
+    const query = String(req.query.q || "").trim();
+
+    if (!placeId && !query) {
+      return sendError(
+        res,
+        400,
+        "PLACE_QUERY_REQUIRED",
+        "A Place ID or photo search query is required.",
+      );
+    }
+
+    const cacheKey = `${placeId}::${query}`;
+
+    try {
+      const cached = placePhotoCache.get(cacheKey);
+
+      if (cached && Date.now() - cached.timestamp < PLACE_PHOTO_CACHE_TTL) {
+        return res.json(cached.data);
+      }
+
+      const photo = await getBestPlacePhoto(
+        {
+          placeId,
+          query,
+        },
+        {
+          maxWidthPx: 1200,
+          maxHeightPx: 900,
+        },
+      );
+
+      const result = {
+        success: Boolean(photo?.photoUrl),
+
+        placeId,
+
+        query,
+
+        photoUrl: photo?.photoUrl || "",
+
+        photoAttribution: photo?.photoAttribution || "",
+
+        photoAttributionUrl: photo?.photoAttributionUrl || "",
+
+        placeName: photo?.placeName || "",
+
+        provider: photo?.provider || "",
+      };
+
+      placePhotoCache.set(cacheKey, {
+        timestamp: Date.now(),
+        data: result,
+      });
+
+      res.setHeader("Cache-Control", "private, max-age=300");
+
+      return res.json(result);
+    } catch (error) {
+      console.error("Place photo route error:", error);
+
+      return res.json({
+        success: false,
+
+        placeId,
+
+        query,
+
+        photoUrl: "",
+
+        photoAttribution: "",
+
+        photoAttributionUrl: "",
+
+        placeName: "",
+
+        provider: "",
+      });
+    }
+  },
+);
+
+/*
+  Alias route.
+
+  This is optional, but I recommend
+  keeping it so future frontend code
+  can also use /api/place-image.
+*/
+app.get(
+  "/api/place-image",
+
+  async (req, res) => {
+    const placeId = String(req.query.placeId || "").trim();
+
+    const query = String(req.query.q || "").trim();
+
+    if (!placeId && !query) {
+      return sendError(
+        res,
+        400,
+        "PLACE_QUERY_REQUIRED",
+        "A Place ID or photo search query is required.",
+      );
+    }
+
+    try {
+      const photo = await getBestPlacePhoto(
+        {
+          placeId,
+          query,
+        },
+        {
+          maxWidthPx: 1200,
+          maxHeightPx: 900,
+        },
+      );
+
+      return res.json({
+        success: Boolean(photo?.photoUrl),
+
+        placeId,
+
+        query,
+
+        photoUrl: photo?.photoUrl || "",
+
+        photoAttribution: photo?.photoAttribution || "",
+
+        photoAttributionUrl: photo?.photoAttributionUrl || "",
+
+        placeName: photo?.placeName || "",
+
+        provider: photo?.provider || "",
+      });
+    } catch (error) {
+      console.error("Place image route error:", error);
+
+      return res.json({
+        success: false,
+
+        placeId,
+
+        query,
+
+        photoUrl: "",
+      });
+    }
+  },
+);
 
 // =====================================
 // GENERATE TRIP
@@ -367,7 +666,6 @@ ${mustVisit || "None"}
 Create a realistic itinerary.
 
 Rules:
-
 - Recommend real destination-specific places.
 - Respect user interests.
 - Keep within budget.
@@ -382,7 +680,6 @@ Rules:
 - No markdown.
 
 Return:
-
 {
   "days": [
     {
@@ -438,14 +735,8 @@ Return:
       };
     }
 
-    // =================================
-    // LIVE DATA ENRICHMENT
-    // =================================
-
     try {
       let days = await enrichItinerary(baseResult.days, req.body);
-
-      // Find coordinates for weather
 
       let locationActivity = days
         .flatMap((day) => day.activities || [])
@@ -460,8 +751,6 @@ Return:
           };
         }
       }
-
-      // Weather
 
       if (locationActivity?.coordinates) {
         const weather = await getWeatherForecast(
@@ -489,11 +778,8 @@ Return:
 
       const realWorldStatus = getIntegrationStatus();
 
-      // Save to Supabase
-
       const savedTrip = await saveTripToSupabase({
         body: req.body,
-
         days,
 
         fallback: baseResult.fallback,
@@ -533,7 +819,7 @@ Return:
 );
 
 // =====================================
-// REPLACE ACTIVITY
+// REPLAN
 // =====================================
 
 app.post(
@@ -583,7 +869,6 @@ ${JSON.stringify(currentDayActivities || [], null, 2)}
 Find ONE realistic replacement.
 
 Return only JSON:
-
 {
   "replacement": {
     "time": "02:00 PM",
@@ -622,21 +907,28 @@ Return only JSON:
 
           name: place.displayName?.text || replacement.name,
 
-          formattedAddress: place.formattedAddress,
+          placeId: place.id || null,
 
-          coordinates: place.location,
+          hasPlacePhoto: Boolean(place.photos?.length),
 
-          mapUrl: place.googleMapsUri,
+          formattedAddress: place.formattedAddress || replacement.location,
+
+          coordinates: place.location || null,
+
+          mapUrl: place.googleMapsUri || null,
+
+          websiteUrl: place.websiteUri || null,
 
           rating: place.rating ?? null,
 
           realPlaceVerified: true,
+
+          photoUrl: null,
         };
       }
 
       return res.json({
         replacement,
-
         fallback: false,
       });
     } catch (error) {
@@ -678,21 +970,28 @@ Return only JSON:
 
             name: place.displayName?.text || replacement.name,
 
-            formattedAddress: place.formattedAddress,
+            placeId: place.id || null,
 
-            coordinates: place.location,
+            hasPlacePhoto: Boolean(place.photos?.length),
 
-            mapUrl: place.googleMapsUri,
+            formattedAddress: place.formattedAddress || replacement.location,
 
-            rating: place.rating,
+            coordinates: place.location || null,
+
+            mapUrl: place.googleMapsUri || null,
+
+            websiteUrl: place.websiteUri || null,
+
+            rating: place.rating ?? null,
 
             realPlaceVerified: true,
+
+            photoUrl: null,
           };
         }
 
         return res.json({
           replacement,
-
           fallback: true,
         });
       }
@@ -713,6 +1012,15 @@ app.post(
     try {
       const { destination, dayNumber, currentDayActivities } = req.body;
 
+      if (!Array.isArray(currentDayActivities)) {
+        return sendError(
+          res,
+          400,
+          "INVALID_CONFLICT_REQUEST",
+          "Current day activities are required.",
+        );
+      }
+
       const prompt = `
 You are TravelPilot's schedule optimization agent.
 
@@ -723,18 +1031,18 @@ Day:
 ${dayNumber}
 
 Activities:
-
 ${JSON.stringify(currentDayActivities, null, 2)}
 
 Remove schedule conflicts.
 
-Respect:
-- activity duration
-- real travel time
-- realistic opening times
+Important:
+- Keep the same real places whenever possible.
+- Change times before changing venues.
+- Preserve activity duration.
+- Respect real travel time.
+- Respect realistic opening times.
 
 Return JSON only:
-
 {
   "updatedActivities": [],
   "reason": "Explanation"
@@ -749,7 +1057,16 @@ Return JSON only:
 
       const result = parseGeminiJson(response.text);
 
-      return res.json(result);
+      const updatedActivities = preserveActivityMetadata(
+        result.updatedActivities || currentDayActivities,
+
+        currentDayActivities,
+      );
+
+      return res.json({
+        ...result,
+        updatedActivities,
+      });
     } catch (error) {
       return handleGeminiError(error, res);
     }
@@ -816,6 +1133,15 @@ app.post(
         itinerary,
       } = req.body;
 
+      if (!message) {
+        return sendError(
+          res,
+          400,
+          "MESSAGE_REQUIRED",
+          "A message is required.",
+        );
+      }
+
       const prompt = `
 You are TravelPilot's trip assistant.
 
@@ -835,11 +1161,9 @@ Travel pace:
 ${travelPace}
 
 Itinerary:
-
 ${JSON.stringify(itinerary, null, 2)}
 
 Question:
-
 ${message}
 
 Use:
@@ -850,7 +1174,6 @@ Use:
 - budget
 
 Be concise.
-
 Do not use markdown.
 `;
 
@@ -903,17 +1226,16 @@ Travel pace:
 ${travelPace}
 
 Current itinerary:
-
 ${JSON.stringify(itinerary, null, 2)}
 
 Preserve:
-- verified real places
+- the same verified real places where possible
 - travel time
 - opening hour data
-where possible.
+
+Prefer reducing estimated activity costs or replacing only expensive activities.
 
 Return JSON only:
-
 {
   "days": [],
   "summary": {
@@ -930,7 +1252,15 @@ Return JSON only:
 
       const result = parseGeminiJson(response.text);
 
-      return res.json(result);
+      const days = preserveItineraryMetadata(
+        result.days || [],
+        itinerary || [],
+      );
+
+      return res.json({
+        ...result,
+        days,
+      });
     } catch (error) {
       if (isRateLimitError(error)) {
         const budget = Number(req.body.budget || 0);
@@ -966,7 +1296,6 @@ Return JSON only:
 
         return res.json({
           days,
-
           fallback: true,
 
           summary: {
@@ -1004,7 +1333,6 @@ app.get(
 
       return res.json({
         trips,
-
         configured: true,
       });
     } catch (error) {
@@ -1021,7 +1349,7 @@ app.get(
 );
 
 // =====================================
-// UPDATE TRANSPORT / ACCOMMODATION
+// UPDATE LOGISTICS
 // =====================================
 
 app.patch(

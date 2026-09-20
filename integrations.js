@@ -1,11 +1,14 @@
 import "dotenv/config";
-// integrations.js
 
 // =====================================
 // ENVIRONMENT VARIABLES
 // =====================================
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
+
+const PHOTON_API_URL = "https://photon.komoot.io/api/";
+
+const WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php";
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 
@@ -68,7 +71,7 @@ const durationToMinutes = (duration) => {
 };
 
 // =====================================
-// GOOGLE PLACES API
+// GOOGLE PLACES SEARCH
 // =====================================
 
 export const googlePlacesSearch = async (query) => {
@@ -96,12 +99,12 @@ export const googlePlacesSearch = async (query) => {
             "places.googleMapsUri",
             "places.rating",
             "places.websiteUri",
+            "places.photos",
           ].join(","),
         },
 
         body: JSON.stringify({
           textQuery: query,
-
           pageSize: 1,
         }),
       },
@@ -126,6 +129,537 @@ export const googlePlacesSearch = async (query) => {
 };
 
 // =====================================
+// AUTOCOMPLETE
+// Google first, Photon fallback
+// =====================================
+
+const photonAutocompleteSuggestions = async ({
+  input,
+  mode = "destination",
+  destination = "",
+}) => {
+  const cleanInput = String(input || "").trim();
+  const cleanDestination = String(destination || "").trim();
+
+  if (!cleanInput) {
+    return [];
+  }
+
+  const query =
+    (mode === "area" || mode === "mustVisit") && cleanDestination
+      ? `${cleanInput}, ${cleanDestination}`
+      : cleanInput;
+
+  const params = new URLSearchParams({
+    q: query,
+    limit: "8",
+    lang: "en",
+  });
+
+  try {
+    const response = await fetch(`${PHOTON_API_URL}?${params.toString()}`);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+
+      throw new Error(`PHOTON_${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+
+    const features = Array.isArray(data?.features) ? data.features : [];
+
+    const regionTypes = new Set([
+      "city",
+      "town",
+      "village",
+      "suburb",
+      "district",
+      "county",
+      "state",
+      "locality",
+      "neighbourhood",
+      "neighborhood",
+      "quarter",
+      "borough",
+    ]);
+
+    const mapped = features
+      .map((feature) => {
+        const properties = feature?.properties || {};
+
+        const parts = [
+          properties.name,
+          properties.street,
+          properties.city,
+          properties.district,
+          properties.state,
+          properties.country,
+        ].filter(Boolean);
+
+        const uniqueParts = [...new Set(parts)];
+
+        const text = uniqueParts.join(", ");
+
+        const mainText =
+          properties.name ||
+          properties.city ||
+          properties.district ||
+          properties.state ||
+          text;
+
+        const secondaryText = uniqueParts
+          .filter((part) => part !== mainText)
+          .join(", ");
+
+        const photonType = properties.osm_value || properties.type || "";
+
+        return {
+          placeId: `photon-${
+            properties.osm_type || properties.type || "place"
+          }-${
+            properties.osm_id ||
+            feature?.geometry?.coordinates?.join("-") ||
+            text
+          }`,
+
+          text,
+
+          mainText,
+
+          secondaryText,
+
+          provider: "photon",
+
+          photonType,
+        };
+      })
+      .filter((item) => item.text);
+
+    if (mode === "area") {
+      const regional = mapped.filter((item) =>
+        regionTypes.has(String(item.photonType || "").toLowerCase()),
+      );
+
+      return (regional.length > 0 ? regional : mapped).slice(0, 7);
+    }
+
+    return mapped.slice(0, 7);
+  } catch (error) {
+    console.error("Photon autocomplete failed:", error);
+
+    return [];
+  }
+};
+
+export const googleAutocompleteSuggestions = async ({
+  input,
+  mode = "destination",
+  destination = "",
+}) => {
+  const cleanInput = String(input || "").trim();
+
+  const cleanDestination = String(destination || "").trim();
+
+  if (!cleanInput) {
+    return [];
+  }
+
+  // =====================================
+  // NO GOOGLE KEY
+  // Use Photon directly
+  // =====================================
+
+  if (!GOOGLE_MAPS_API_KEY) {
+    return photonAutocompleteSuggestions({
+      input: cleanInput,
+      mode,
+      destination: cleanDestination,
+    });
+  }
+
+  const isArea = mode === "area";
+
+  const shouldAppendDestination =
+    (mode === "area" || mode === "mustVisit") && cleanDestination;
+
+  const requestBody = {
+    input: shouldAppendDestination
+      ? `${cleanInput}, ${cleanDestination}`
+      : cleanInput,
+
+    languageCode: "en",
+  };
+
+  if (isArea) {
+    requestBody.includedPrimaryTypes = ["(regions)"];
+  }
+
+  // =====================================
+  // TRY GOOGLE FIRST
+  // =====================================
+
+  try {
+    const response = await fetch(
+      "https://places.googleapis.com/v1/places:autocomplete",
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+
+          "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+
+          "X-Goog-FieldMask": [
+            "suggestions.placePrediction.placeId",
+            "suggestions.placePrediction.text.text",
+            "suggestions.placePrediction.structuredFormat.mainText.text",
+            "suggestions.placePrediction.structuredFormat.secondaryText.text",
+          ].join(","),
+        },
+
+        body: JSON.stringify(requestBody),
+      },
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+
+      const googleSuggestions = (data.suggestions || [])
+        .map((suggestion) => {
+          const prediction = suggestion.placePrediction;
+
+          if (!prediction) {
+            return null;
+          }
+
+          return {
+            placeId: prediction.placeId || "",
+
+            text: prediction.text?.text || "",
+
+            mainText:
+              prediction.structuredFormat?.mainText?.text ||
+              prediction.text?.text ||
+              "",
+
+            secondaryText:
+              prediction.structuredFormat?.secondaryText?.text || "",
+
+            provider: "google",
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 7);
+
+      if (googleSuggestions.length > 0) {
+        return googleSuggestions;
+      }
+    } else {
+      const errorText = await response.text();
+
+      console.error("Google autocomplete error:", response.status, errorText);
+    }
+  } catch (error) {
+    console.error("Google autocomplete failed:", error);
+  }
+
+  // =====================================
+  // GOOGLE FAILED
+  // Automatically use Photon
+  // =====================================
+
+  console.log("TravelPilot: switching autocomplete to Photon fallback.");
+
+  return photonAutocompleteSuggestions({
+    input: cleanInput,
+    mode,
+    destination: cleanDestination,
+  });
+};
+
+// =====================================
+// GOOGLE PLACE PHOTO
+// =====================================
+
+export const getGooglePlacePhoto = async (
+  placeId,
+  { maxWidthPx = 1200, maxHeightPx = 900 } = {},
+) => {
+  const cleanPlaceId = String(placeId || "").trim();
+
+  if (!GOOGLE_MAPS_API_KEY || !cleanPlaceId) {
+    return null;
+  }
+
+  try {
+    // Get fresh place details
+    const detailsResponse = await fetch(
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(
+        cleanPlaceId,
+      )}`,
+      {
+        method: "GET",
+
+        headers: {
+          "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+
+          "X-Goog-FieldMask": "id,displayName,photos",
+        },
+      },
+    );
+
+    if (!detailsResponse.ok) {
+      const errorText = await detailsResponse.text();
+
+      console.error(
+        "Google Place Details photo lookup error:",
+        detailsResponse.status,
+        errorText,
+      );
+
+      return null;
+    }
+
+    const place = await detailsResponse.json();
+
+    const photo = place?.photos?.[0];
+
+    if (!photo?.name) {
+      return null;
+    }
+
+    const params = new URLSearchParams({
+      key: GOOGLE_MAPS_API_KEY,
+
+      maxWidthPx: String(maxWidthPx),
+
+      maxHeightPx: String(maxHeightPx),
+
+      skipHttpRedirect: "true",
+    });
+
+    const photoResponse = await fetch(
+      `https://places.googleapis.com/v1/${photo.name}/media?${params.toString()}`,
+    );
+
+    if (!photoResponse.ok) {
+      const errorText = await photoResponse.text();
+
+      console.error(
+        "Google Place Photo error:",
+        photoResponse.status,
+        errorText,
+      );
+
+      return null;
+    }
+
+    const photoData = await photoResponse.json();
+
+    if (!photoData?.photoUri) {
+      return null;
+    }
+
+    const attribution = photo?.authorAttributions?.[0];
+
+    return {
+      photoUrl: photoData.photoUri,
+
+      photoAttribution: attribution?.displayName
+        ? `Photo by ${attribution.displayName}`
+        : "",
+
+      photoAttributionUrl: attribution?.uri || "",
+
+      placeName: place?.displayName?.text || "",
+    };
+  } catch (error) {
+    console.error("Google Place Photo lookup failed:", error);
+
+    return null;
+  }
+};
+// =====================================
+// WIKIMEDIA PHOTO FALLBACK
+// =====================================
+
+const cleanAttributionHtml = (value) =>
+  String(value || "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+export const getWikimediaPlacePhoto = async (
+  query,
+  { maxWidthPx = 1200 } = {},
+) => {
+  const cleanQuery = String(query || "").trim();
+
+  if (!cleanQuery) {
+    return null;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      action: "query",
+
+      generator: "search",
+
+      gsrsearch: cleanQuery,
+
+      gsrnamespace: "6",
+
+      gsrlimit: "8",
+
+      prop: "imageinfo",
+
+      iiprop: "url|extmetadata",
+
+      iiurlwidth: String(maxWidthPx),
+
+      format: "json",
+
+      origin: "*",
+    });
+
+    const response = await fetch(`${WIKIMEDIA_API_URL}?${params.toString()}`, {
+      headers: {
+        "User-Agent": "TravelPilot/1.0",
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+
+      console.error(
+        "Wikimedia image search error:",
+        response.status,
+        errorText,
+      );
+
+      return null;
+    }
+
+    const data = await response.json();
+
+    const pages = Object.values(data?.query?.pages || {});
+
+    const blockedWords = [
+      "logo",
+      "icon",
+      "diagram",
+      "map",
+      "flag",
+      "signature",
+      "portrait",
+      "poster",
+      "coat of arms",
+    ];
+
+    const usablePage =
+      pages.find((page) => {
+        const title = String(page?.title || "").toLowerCase();
+
+        const info = page?.imageinfo?.[0];
+
+        const url = info?.thumburl || info?.url || "";
+
+        if (!url) {
+          return false;
+        }
+
+        return !blockedWords.some((word) => title.includes(word));
+      }) ||
+      pages.find(
+        (page) => page?.imageinfo?.[0]?.thumburl || page?.imageinfo?.[0]?.url,
+      );
+
+    const info = usablePage?.imageinfo?.[0];
+
+    if (!info) {
+      return null;
+    }
+
+    const metadata = info.extmetadata || {};
+
+    const artist = cleanAttributionHtml(metadata.Artist?.value);
+
+    return {
+      photoUrl: info.thumburl || info.url || "",
+
+      photoAttribution: artist ? `Photo: ${artist}` : "Wikimedia Commons",
+
+      photoAttributionUrl: info.descriptionurl || "",
+
+      placeName: cleanAttributionHtml(metadata.ObjectName?.value),
+
+      provider: "wikimedia",
+    };
+  } catch (error) {
+    console.error("Wikimedia photo lookup failed:", error);
+
+    return null;
+  }
+};
+
+// =====================================
+// BEST AVAILABLE PLACE PHOTO
+// Google first → Wikimedia fallback
+// =====================================
+
+export const getBestPlacePhoto = async (
+  { placeId = "", query = "" } = {},
+
+  { maxWidthPx = 1200, maxHeightPx = 900 } = {},
+) => {
+  const cleanPlaceId = String(placeId || "").trim();
+
+  const cleanQuery = String(query || "").trim();
+
+  // Photon IDs cannot be sent to Google.
+  const isGooglePlaceId = cleanPlaceId && !cleanPlaceId.startsWith("photon-");
+
+  // =====================================
+  // TRY GOOGLE IMAGE FIRST
+  // =====================================
+
+  if (isGooglePlaceId && GOOGLE_MAPS_API_KEY) {
+    try {
+      const googlePhoto = await getGooglePlacePhoto(cleanPlaceId, {
+        maxWidthPx,
+        maxHeightPx,
+      });
+
+      if (googlePhoto?.photoUrl) {
+        return {
+          ...googlePhoto,
+          provider: "google",
+        };
+      }
+    } catch (error) {
+      console.error("Google photo fallback error:", error);
+    }
+  }
+
+  // =====================================
+  // GOOGLE HAS NO PHOTO / FAILED
+  // TRY WIKIMEDIA
+  // =====================================
+
+  if (cleanQuery) {
+    const wikimediaPhoto = await getWikimediaPlacePhoto(cleanQuery, {
+      maxWidthPx,
+    });
+
+    if (wikimediaPhoto?.photoUrl) {
+      return wikimediaPhoto;
+    }
+  }
+
+  return null;
+};
+// =====================================
 // OPENING HOURS
 // =====================================
 
@@ -137,7 +671,6 @@ export const getOpeningStatus = (place, dateString, timeString) => {
   if (!Array.isArray(periods) || scheduledMinutes === null || !dateString) {
     return {
       status: "unknown",
-
       label: "Opening hours unavailable",
     };
   }
@@ -151,7 +684,6 @@ export const getOpeningStatus = (place, dateString, timeString) => {
   if (matchingPeriods.length === 0) {
     return {
       status: "closed",
-
       label: "Appears closed on this day",
     };
   }
@@ -164,7 +696,6 @@ export const getOpeningStatus = (place, dateString, timeString) => {
     const openMinutes =
       Number(open?.hour || 0) * 60 + Number(open?.minute || 0);
 
-    // 24-hour opening period
     if (!close) {
       return scheduledMinutes >= openMinutes;
     }
@@ -176,25 +707,22 @@ export const getOpeningStatus = (place, dateString, timeString) => {
       return scheduledMinutes >= openMinutes && scheduledMinutes < closeMinutes;
     }
 
-    // Closes next day
     return scheduledMinutes >= openMinutes;
   });
 
   return isOpen
     ? {
         status: "open",
-
         label: "Open at scheduled time",
       }
     : {
         status: "closed",
-
         label: "May be closed at scheduled time",
       };
 };
 
 // =====================================
-// GOOGLE ROUTES API
+// GOOGLE ROUTES
 // =====================================
 
 export const getRouteMetrics = async (origin, destination) => {
@@ -277,7 +805,7 @@ export const getRouteMetrics = async (origin, destination) => {
 };
 
 // =====================================
-// ITINERARY REAL-WORLD ENRICHMENT
+// ENRICH ITINERARY
 // =====================================
 
 export const enrichItinerary = async (days, { destination, startDate }) => {
@@ -287,7 +815,6 @@ export const enrichItinerary = async (days, { destination, startDate }) => {
 
   const updatedDays = [];
 
-  // Prevent excessive Google requests
   let requestCount = 0;
 
   const MAX_PLACE_REQUESTS = 18;
@@ -307,6 +834,10 @@ export const enrichItinerary = async (days, { destination, startDate }) => {
 
         realPlaceVerified: false,
 
+        placeId: activity?.placeId || null,
+
+        hasPlacePhoto: false,
+
         openingHoursStatus: "unknown",
 
         openingHoursLabel: "Not verified",
@@ -319,7 +850,7 @@ export const enrichItinerary = async (days, { destination, startDate }) => {
 
         const place = await googlePlacesSearch(query);
 
-        requestCount++;
+        requestCount += 1;
 
         if (place) {
           const openingStatus = getOpeningStatus(
@@ -335,9 +866,11 @@ export const enrichItinerary = async (days, { destination, startDate }) => {
 
             realPlaceVerified: true,
 
-            placeId: place.id,
+            placeId: place.id || null,
 
-            formattedAddress: place.formattedAddress,
+            hasPlacePhoto: Boolean(place.photos?.length),
+
+            formattedAddress: place.formattedAddress || activity.location,
 
             coordinates: place.location || null,
 
@@ -354,7 +887,6 @@ export const enrichItinerary = async (days, { destination, startDate }) => {
             openingHours: place.regularOpeningHours?.weekdayDescriptions || [],
           };
 
-          // Real travel time
           if (previousCoordinates && updatedActivity.coordinates) {
             const route = await getRouteMetrics(
               previousCoordinates,
@@ -453,13 +985,9 @@ export const getWeatherForecast = async (latitude, longitude) => {
 
       daily: [
         "weather_code",
-
         "precipitation_probability_max",
-
         "wind_speed_10m_max",
-
         "temperature_2m_max",
-
         "temperature_2m_min",
       ].join(","),
 
@@ -551,9 +1079,10 @@ export const attachWeatherToDays = (days, weatherByDate) => {
 };
 
 export const isOutdoorActivity = (activity) => {
-  const haystack = `${activity?.name || ""} ${
-    activity?.category || ""
-  }`.toLowerCase();
+  const haystack = `
+      ${activity?.name || ""}
+      ${activity?.category || ""}
+    `.toLowerCase();
 
   const outdoorWords = [
     "adventure",
@@ -568,6 +1097,11 @@ export const isOutdoorActivity = (activity) => {
     "boat",
     "cruise",
     "trek",
+    "rafting",
+    "waterfall",
+    "viewpoint",
+    "lake",
+    "river",
   ];
 
   return outdoorWords.some((word) => haystack.includes(word));
@@ -595,6 +1129,7 @@ export const adaptTripForWeather = async (days, destination) => {
   for (const day of days) {
     if (day.weather?.risk !== "high") {
       updatedDays.push(day);
+
       continue;
     }
 
@@ -624,12 +1159,18 @@ export const adaptTripForWeather = async (days, destination) => {
           replacement?.displayName?.text ||
           `Indoor alternative near ${activity.location || destination}`,
 
+        placeId: replacement?.id || null,
+
+        hasPlacePhoto: Boolean(replacement?.photos?.length),
+
         formattedAddress:
           replacement?.formattedAddress || activity.formattedAddress,
 
         coordinates: replacement?.location || activity.coordinates,
 
         mapUrl: replacement?.googleMapsUri || activity.mapUrl,
+
+        websiteUrl: replacement?.websiteUri || activity.websiteUrl || null,
 
         rating: replacement?.rating ?? activity.rating,
 
@@ -647,7 +1188,6 @@ export const adaptTripForWeather = async (days, destination) => {
 
     updatedDays.push({
       ...day,
-
       activities: newActivities,
     });
   }
@@ -782,7 +1322,7 @@ export const saveTripToSupabase = async ({
 };
 
 // =====================================
-// GET TRIP HISTORY
+// TRIP HISTORY
 // =====================================
 
 export const getTripHistory = async () => {
@@ -830,9 +1370,15 @@ export const updateTripLogistics = async (id, data) => {
 // =====================================
 
 export const getIntegrationStatus = () => ({
-  places: GOOGLE_MAPS_API_KEY ? "enabled" : "not_configured",
+  places: GOOGLE_MAPS_API_KEY ? "enabled" : "fallback",
 
   routes: GOOGLE_MAPS_API_KEY ? "enabled" : "not_configured",
+
+  // Google + Wikimedia fallback
+  photos: "enabled",
+
+  // Google + Photon fallback
+  autocomplete: "enabled",
 
   weather: "enabled",
 
